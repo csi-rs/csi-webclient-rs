@@ -189,6 +189,18 @@ impl CsiClientApp {
         while let Some(event) = self.core.try_recv() {
             match event {
                 CoreEvent::ApiResponse(response) => {
+                    if response.success {
+                        match response.label.as_str() {
+                            "start_collection" => {
+                                self.state.runtime.collection_active_estimate = true;
+                            }
+                            "reset_device" => {
+                                self.state.runtime.collection_active_estimate = false;
+                            }
+                            _ => {}
+                        }
+                    }
+
                     self.state.runtime.last_http_status = Some(response.status);
 
                     if response.success {

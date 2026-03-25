@@ -217,6 +217,8 @@ pub struct FrameSummary {
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeState {
     pub ws_connected: bool,
+    /// Client-estimated collection session state derived from control API responses.
+    pub collection_active_estimate: bool,
     pub frames_received: u64,
     pub bytes_received: u64,
     pub recent_frames: Vec<FrameSummary>,

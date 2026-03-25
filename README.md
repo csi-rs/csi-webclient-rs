@@ -1,5 +1,7 @@
 # csi-webserver-cli-rs
 
+![Preview](assets/preview.png)
+
 Desktop client for configuring and controlling `csi-webserver` remotely.
 
 This project provides a native Rust GUI (egui/eframe) that talks to a running `csi-webserver` instance over HTTP and WebSocket. It is designed for responsive operation, strict architectural separation, and easy troubleshooting during CSI collection sessions.
