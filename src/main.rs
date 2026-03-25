@@ -1,7 +1,4 @@
-mod app;
-mod core;
-mod state;
-mod ui;
+use csi_webserver_cli_rs::app;
 
 fn main() -> eframe::Result<()> {
     let mut options = eframe::NativeOptions::default();

@@ -5,12 +5,20 @@ use crate::ui;
 use eframe::egui;
 use serde_json::json;
 
+/// Top-level egui application.
+///
+/// This type orchestrates the intent-command-event flow:
+///
+/// - reads and drains user intents from [`crate::state::AppState`]
+/// - submits commands to [`crate::core::CoreHandle`]
+/// - applies resulting core events back into state
 pub struct CsiClientApp {
     state: AppState,
     core: CoreHandle,
 }
 
 impl CsiClientApp {
+    /// Create a new app instance with default state and a running core worker.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
             state: AppState::with_defaults(),
@@ -18,6 +26,9 @@ impl CsiClientApp {
         }
     }
 
+    /// Drain queued user intents and translate them into core commands.
+    ///
+    /// This keeps network and runtime side effects out of the UI modules.
     fn process_intents(&mut self) {
         for intent in self.state.drain_intents() {
             match intent {
@@ -173,6 +184,7 @@ impl CsiClientApp {
         }
     }
 
+    /// Poll and apply core worker events without blocking the frame loop.
     fn process_core_events(&mut self) {
         while let Some(event) = self.core.try_recv() {
             match event {
@@ -225,6 +237,7 @@ impl CsiClientApp {
         }
     }
 
+    /// Render the shared top panel (host/port fields, tabs, status and errors).
     fn render_top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
@@ -259,6 +272,12 @@ impl CsiClientApp {
 }
 
 impl eframe::App for CsiClientApp {
+    /// Main egui frame update callback.
+    ///
+    /// The update order is:
+    /// 1. apply incoming core events
+    /// 2. process queued user intents
+    /// 3. render UI panels
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.process_core_events();
         self.process_intents();
@@ -276,6 +295,7 @@ impl eframe::App for CsiClientApp {
     }
 }
 
+/// Parse a `DeviceConfig` from a direct payload or common API envelope.
 fn parse_device_config(data: serde_json::Value) -> Option<DeviceConfig> {
     if let Ok(config) = serde_json::from_value::<DeviceConfig>(data.clone()) {
         return Some(config);
@@ -288,6 +308,7 @@ fn parse_device_config(data: serde_json::Value) -> Option<DeviceConfig> {
     None
 }
 
+/// Parse an optional `u16` where empty input means `None`.
 fn parse_optional_u16(input: &str) -> Option<u16> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -296,14 +317,17 @@ fn parse_optional_u16(input: &str) -> Option<u16> {
     trimmed.parse::<u16>().ok()
 }
 
+/// Parse a required `u16`.
 fn parse_required_u16(input: &str) -> Option<u16> {
     input.trim().parse::<u16>().ok()
 }
 
+/// Parse a required `u8`.
 fn parse_required_u8(input: &str) -> Option<u8> {
     input.trim().parse::<u8>().ok()
 }
 
+/// Parse an optional `u64` where empty input means `None`.
 fn parse_optional_u64(input: &str) -> Option<u64> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -312,6 +336,9 @@ fn parse_optional_u64(input: &str) -> Option<u64> {
     trimmed.parse::<u64>().ok()
 }
 
+/// Convert user text to optional string while preserving significant whitespace.
+///
+/// Returns `None` only when the input is entirely whitespace.
 fn empty_to_none(input: String) -> Option<String> {
     if input.trim().is_empty() {
         None
@@ -320,6 +347,7 @@ fn empty_to_none(input: String) -> Option<String> {
     }
 }
 
+/// Render one tab selector button and switch active tab on click.
 fn tab_button(ui: &mut egui::Ui, state: &mut AppState, tab: Tab, label: &str) {
     let selected = state.transient.active_tab == tab;
     if ui.selectable_label(selected, label).clicked() {

@@ -1,5 +1,6 @@
 use crate::state::{AppState, UserIntent};
 
+/// Render the control view.
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Control");
     ui.separator();

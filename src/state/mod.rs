@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+/// UI navigation tabs for the main window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Tab {
     #[default]
@@ -9,6 +10,7 @@ pub enum Tab {
     Stream,
 }
 
+/// Wi-Fi operating modes supported by the backend API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WiFiMode {
     Sta,
@@ -17,6 +19,7 @@ pub enum WiFiMode {
 }
 
 impl WiFiMode {
+    /// Convert enum variant to backend API value.
     pub fn as_api_value(self) -> &'static str {
         match self {
             Self::Sta => "sta",
@@ -32,6 +35,7 @@ impl Default for WiFiMode {
     }
 }
 
+/// Collection role for the ESP32 firmware session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CollectionMode {
     Collector,
@@ -39,6 +43,7 @@ pub enum CollectionMode {
 }
 
 impl CollectionMode {
+    /// Convert enum variant to backend API value.
     pub fn as_api_value(self) -> &'static str {
         match self {
             Self::Collector => "collector",
@@ -53,6 +58,7 @@ impl Default for CollectionMode {
     }
 }
 
+/// Serial framing/log mode accepted by `POST /api/config/log-mode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogMode {
     Text,
@@ -61,6 +67,7 @@ pub enum LogMode {
 }
 
 impl LogMode {
+    /// Convert enum variant to backend API value.
     pub fn as_api_value(self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -76,6 +83,7 @@ impl Default for LogMode {
     }
 }
 
+/// Output routing mode for CSI frames.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputMode {
     Stream,
@@ -84,6 +92,7 @@ pub enum OutputMode {
 }
 
 impl OutputMode {
+    /// Convert enum variant to backend API value.
     pub fn as_api_value(self) -> &'static str {
         match self {
             Self::Stream => "stream",
@@ -99,6 +108,7 @@ impl Default for OutputMode {
     }
 }
 
+/// Editable Wi-Fi form values in the Config view.
 #[derive(Debug, Clone, Default)]
 pub struct WiFiForm {
     pub mode: WiFiMode,
@@ -107,6 +117,7 @@ pub struct WiFiForm {
     pub channel: String,
 }
 
+/// Editable traffic configuration form values.
 #[derive(Debug, Clone)]
 pub struct TrafficForm {
     pub frequency_hz: String,
@@ -120,6 +131,7 @@ impl Default for TrafficForm {
     }
 }
 
+/// Editable CSI feature flags and numeric values.
 #[derive(Debug, Clone)]
 pub struct CsiForm {
     pub disable_lltf: bool,
@@ -159,6 +171,7 @@ impl Default for CsiForm {
     }
 }
 
+/// User/session-level state persisted during app runtime.
 #[derive(Debug, Clone, Default)]
 pub struct PersistentState {
     pub server_host: String,
@@ -172,6 +185,7 @@ pub struct PersistentState {
     pub start_duration_seconds: String,
 }
 
+/// Ephemeral UI state that is not part of backend/device config.
 #[derive(Debug, Clone)]
 pub struct TransientUiState {
     pub active_tab: Tab,
@@ -191,6 +205,7 @@ impl Default for TransientUiState {
     }
 }
 
+/// Lightweight frame metadata shown in the Stream tab.
 #[derive(Debug, Clone, Default)]
 pub struct FrameSummary {
     pub timestamp: String,
@@ -198,6 +213,7 @@ pub struct FrameSummary {
     pub preview_hex: String,
 }
 
+/// Runtime status produced by background IO work.
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeState {
     pub ws_connected: bool,
@@ -209,6 +225,7 @@ pub struct RuntimeState {
     pub latest_config: Option<DeviceConfig>,
 }
 
+/// High-level user actions queued by the UI for orchestration.
 #[derive(Debug, Clone)]
 pub enum UserIntent {
     FetchConfig,
@@ -226,6 +243,7 @@ pub enum UserIntent {
     ClearFrames,
 }
 
+/// Cached server-side device configuration model.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DeviceConfig {
     pub wifi_mode: Option<String>,
@@ -237,6 +255,9 @@ pub struct DeviceConfig {
     pub log_format: Option<String>,
 }
 
+/// Full application state.
+///
+/// This is the single source of truth for all UI-visible data.
 #[derive(Debug, Clone, Default)]
 pub struct AppState {
     pub persistent: PersistentState,
@@ -246,6 +267,7 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// Construct default state with localhost webserver settings.
     pub fn with_defaults() -> Self {
         let mut state = Self::default();
         state.persistent.server_host = "127.0.0.1".to_owned();
@@ -253,14 +275,17 @@ impl AppState {
         state
     }
 
+    /// Queue one user intent.
     pub fn push_intent(&mut self, intent: UserIntent) {
         self.intent_queue.push(intent);
     }
 
+    /// Drain queued intents in FIFO order.
     pub fn drain_intents(&mut self) -> Vec<UserIntent> {
         std::mem::take(&mut self.intent_queue)
     }
 
+    /// Append one event line to runtime history.
     pub fn push_event(&mut self, message: impl Into<String>) {
         self.runtime.events.push(message.into());
         if self.runtime.events.len() > 300 {
@@ -269,6 +294,7 @@ impl AppState {
         }
     }
 
+    /// Record one received frame and update stream counters/history.
     pub fn push_frame(&mut self, bytes: &[u8]) {
         self.runtime.frames_received = self.runtime.frames_received.saturating_add(1);
         self.runtime.bytes_received = self.runtime.bytes_received.saturating_add(bytes.len() as u64);
@@ -292,6 +318,7 @@ impl AppState {
         }
     }
 
+    /// Build HTTP base URL from host/port fields.
     pub fn base_http_url(&self) -> String {
         format!(
             "http://{}:{}",
@@ -300,6 +327,7 @@ impl AppState {
         )
     }
 
+    /// Build WebSocket stream URL from host/port fields.
     pub fn base_ws_url(&self) -> String {
         format!(
             "ws://{}:{}/api/ws",
@@ -308,6 +336,7 @@ impl AppState {
         )
     }
 
+    /// Apply server config payload into local persistent state fields.
     pub fn apply_device_config(&mut self, config: DeviceConfig) {
         if let Some(mode) = config.wifi_mode.as_deref() {
             self.persistent.wifi.mode = match mode {

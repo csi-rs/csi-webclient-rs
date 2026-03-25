@@ -4,6 +4,10 @@ use std::sync::mpsc::Sender;
 use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
+/// Run the WebSocket receive loop until remote close, error, or stop signal.
+///
+/// Every received text/binary payload is forwarded as `CoreEvent::WebSocketFrame`.
+/// The caller is responsible for deciding how to interpret payload bytes.
 pub async fn run_ws_loop(
     url: String,
     mut stop_rx: oneshot::Receiver<()>,

@@ -1,5 +1,6 @@
 use crate::state::AppState;
 
+/// Render the dashboard view.
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Dashboard");
     ui.separator();

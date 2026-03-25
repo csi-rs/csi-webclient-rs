@@ -2,6 +2,7 @@ use crate::core::messages::{ApiRequest, ApiResponseEvent, CoreEvent, HttpMethod}
 use serde::Deserialize;
 use serde_json::Value;
 
+/// Best-effort parser for the common webserver API envelope.
 #[derive(Debug, Deserialize)]
 struct GenericApiResponse {
     #[allow(dead_code)]
@@ -10,6 +11,10 @@ struct GenericApiResponse {
     data: Option<Value>,
 }
 
+/// Execute one API request and convert the result into a [`CoreEvent`].
+///
+/// This function never panics for expected network/protocol errors. Instead,
+/// failures are converted into `CoreEvent::ApiResponse` with `success = false`.
 pub async fn execute_api_request(req: ApiRequest) -> CoreEvent {
     let client = reqwest::Client::new();
     let url = format!("{}{}", req.base_url, req.path);

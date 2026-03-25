@@ -2,6 +2,9 @@
 name = "csi-webserver-cli-rs"
 version = "0.1.0"
 edition = "2024"
+description = "Desktop egui client for csi-webserver REST/WebSocket control and CSI stream monitoring"
+readme = "README.md"
+license-file = "LICENSE"
 
 [dependencies]
 chrono = "0.4.42"

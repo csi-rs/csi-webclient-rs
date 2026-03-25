@@ -2,6 +2,7 @@ use crate::state::{
     AppState, CollectionMode, LogMode, OutputMode, UserIntent, WiFiMode,
 };
 
+/// Render the configuration view.
 pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
     ui.heading("Configuration");
     ui.separator();
@@ -124,6 +125,7 @@ fn mode_picker(ui: &mut egui::Ui, mode: &mut WiFiMode) {
         });
 }
 
+/// Render collection mode selector.
 fn collection_mode_picker(ui: &mut egui::Ui, mode: &mut CollectionMode) {
     egui::ComboBox::from_id_salt("collection_mode_combo")
         .selected_text(mode.as_api_value())
@@ -133,6 +135,7 @@ fn collection_mode_picker(ui: &mut egui::Ui, mode: &mut CollectionMode) {
         });
 }
 
+/// Render log mode selector.
 fn log_mode_picker(ui: &mut egui::Ui, mode: &mut LogMode) {
     egui::ComboBox::from_id_salt("log_mode_combo")
         .selected_text(mode.as_api_value())
@@ -143,6 +146,7 @@ fn log_mode_picker(ui: &mut egui::Ui, mode: &mut LogMode) {
         });
 }
 
+/// Render output mode selector.
 fn output_mode_picker(ui: &mut egui::Ui, mode: &mut OutputMode) {
     egui::ComboBox::from_id_salt("output_mode_combo")
         .selected_text(mode.as_api_value())
