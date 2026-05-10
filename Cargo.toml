@@ -1,6 +1,6 @@
 [package]
 name = "csi-webclient"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Desktop egui client for csi-webserver REST/WebSocket control and CSI stream monitoring"
 documentation = "https://docs.rs/csi-webclient"
