@@ -1,9 +1,13 @@
-use crate::core::messages::{ApiRequest, CoreCommand, CoreEvent, HttpMethod};
 use crate::core::CoreHandle;
-use crate::state::{AppState, DeviceConfig, Tab, UserIntent};
+use crate::core::messages::{ApiRequest, CoreCommand, CoreEvent, HttpMethod};
+use crate::state::{
+    AppState, ControlStatus, DeviceConfig, DeviceInfo, Tab, UserIntent, WiFiForm,
+};
 use crate::ui;
 use eframe::egui;
-use serde_json::json;
+use serde_json::{Value, json};
+
+const STA_FIELD_MAX_BYTES: usize = 32;
 
 /// Top-level egui application.
 ///
@@ -27,74 +31,36 @@ impl CsiClientApp {
     }
 
     /// Drain queued user intents and translate them into core commands.
-    ///
-    /// This keeps network and runtime side effects out of the UI modules.
     fn process_intents(&mut self) {
         for intent in self.state.drain_intents() {
             match intent {
-                UserIntent::FetchConfig => {
-                    self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                        label: "fetch_config".to_owned(),
-                        method: HttpMethod::Get,
-                        base_url: self.state.base_http_url(),
-                        path: "/api/config".to_owned(),
-                        body: None,
-                    }));
+                UserIntent::FetchConfig => self.submit_get("fetch_config", "/api/config"),
+                UserIntent::FetchInfo => self.submit_get("fetch_info", "/api/info"),
+                UserIntent::FetchStatus => {
+                    self.submit_get("fetch_status", "/api/control/status");
                 }
-                UserIntent::ResetConfig => {
-                    self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                        label: "reset_config".to_owned(),
-                        method: HttpMethod::Post,
-                        base_url: self.state.base_http_url(),
-                        path: "/api/config/reset".to_owned(),
-                        body: None,
-                    }));
-                }
-                UserIntent::SetWifi(wifi) => {
-                    let channel = parse_optional_u16(&wifi.channel);
-                    if wifi.channel.trim().is_empty() || channel.is_some() {
-                        self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                            label: "set_wifi".to_owned(),
-                            method: HttpMethod::Post,
-                            base_url: self.state.base_http_url(),
-                            path: "/api/config/wifi".to_owned(),
-                            body: Some(json!({
-                                "mode": wifi.mode.as_api_value(),
-                                "sta_ssid": empty_to_none(wifi.sta_ssid),
-                                "sta_password": empty_to_none(wifi.sta_password),
-                                "channel": channel,
-                            })),
-                        }));
-                    } else {
-                        self.state.transient.error_message =
-                            "Wi-Fi channel must be a valid number".to_owned();
-                    }
-                }
+                UserIntent::ResetConfig => self.submit_post("reset_config", "/api/config/reset", None),
+                UserIntent::SetWifi(wifi) => self.submit_set_wifi(wifi),
                 UserIntent::SetTraffic(traffic) => {
-                    if let Some(frequency_hz) = parse_required_u16(&traffic.frequency_hz) {
-                        self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                            label: "set_traffic".to_owned(),
-                            method: HttpMethod::Post,
-                            base_url: self.state.base_http_url(),
-                            path: "/api/config/traffic".to_owned(),
-                            body: Some(json!({ "frequency_hz": frequency_hz })),
-                        }));
+                    if let Some(frequency_hz) = parse_required_u64(&traffic.frequency_hz) {
+                        self.submit_post(
+                            "set_traffic",
+                            "/api/config/traffic",
+                            Some(json!({ "frequency_hz": frequency_hz })),
+                        );
                     } else {
-                        self.state.transient.error_message =
-                            "Traffic frequency must be a valid number".to_owned();
+                        self.set_error("Traffic frequency must be a non-negative integer");
                     }
                 }
                 UserIntent::SetCsi(csi) => {
-                    let csi_he_stbc = parse_required_u8(&csi.csi_he_stbc);
-                    let val_scale_cfg = parse_required_u8(&csi.val_scale_cfg);
+                    let csi_he_stbc = parse_required_u32(&csi.csi_he_stbc);
+                    let val_scale_cfg = parse_required_u32(&csi.val_scale_cfg);
 
                     if let (Some(csi_he_stbc), Some(val_scale_cfg)) = (csi_he_stbc, val_scale_cfg) {
-                        self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                            label: "set_csi".to_owned(),
-                            method: HttpMethod::Post,
-                            base_url: self.state.base_http_url(),
-                            path: "/api/config/csi".to_owned(),
-                            body: Some(json!({
+                        self.submit_post(
+                            "set_csi",
+                            "/api/config/csi",
+                            Some(json!({
                                 "disable_lltf": csi.disable_lltf,
                                 "disable_htltf": csi.disable_htltf,
                                 "disable_stbc_htltf": csi.disable_stbc_htltf,
@@ -108,64 +74,83 @@ impl CsiClientApp {
                                 "disable_csi_dcm": csi.disable_csi_dcm,
                                 "disable_csi_beamformed": csi.disable_csi_beamformed,
                                 "csi_he_stbc": csi_he_stbc,
-                                "val_scale_cfg": val_scale_cfg
+                                "val_scale_cfg": val_scale_cfg,
                             })),
-                        }));
+                        );
                     } else {
-                        self.state.transient.error_message =
-                            "CSI u8 fields must be valid numbers in 0..255".to_owned();
+                        self.set_error("csi_he_stbc and val_scale_cfg must be valid u32 numbers");
                     }
                 }
                 UserIntent::SetCollectionMode(mode) => {
-                    self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                        label: "set_collection_mode".to_owned(),
-                        method: HttpMethod::Post,
-                        base_url: self.state.base_http_url(),
-                        path: "/api/config/collection-mode".to_owned(),
-                        body: Some(json!({ "mode": mode.as_api_value() })),
-                    }));
+                    self.submit_post(
+                        "set_collection_mode",
+                        "/api/config/collection-mode",
+                        Some(json!({ "mode": mode.as_api_value() })),
+                    );
                 }
                 UserIntent::SetLogMode(mode) => {
-                    self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                        label: "set_log_mode".to_owned(),
-                        method: HttpMethod::Post,
-                        base_url: self.state.base_http_url(),
-                        path: "/api/config/log-mode".to_owned(),
-                        body: Some(json!({ "mode": mode.as_api_value() })),
-                    }));
+                    self.submit_post(
+                        "set_log_mode",
+                        "/api/config/log-mode",
+                        Some(json!({ "mode": mode.as_api_value() })),
+                    );
                 }
                 UserIntent::SetOutputMode(mode) => {
-                    self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                        label: "set_output_mode".to_owned(),
-                        method: HttpMethod::Post,
-                        base_url: self.state.base_http_url(),
-                        path: "/api/config/output-mode".to_owned(),
-                        body: Some(json!({ "mode": mode.as_api_value() })),
-                    }));
+                    self.submit_post(
+                        "set_output_mode",
+                        "/api/config/output-mode",
+                        Some(json!({ "mode": mode.as_api_value() })),
+                    );
+                }
+                UserIntent::SetPhyRate(form) => {
+                    let rate = form.rate.trim().to_owned();
+                    if rate.is_empty() {
+                        self.set_error("PHY rate must not be empty");
+                    } else {
+                        self.submit_post(
+                            "set_rate",
+                            "/api/config/rate",
+                            Some(json!({ "rate": rate })),
+                        );
+                    }
+                }
+                UserIntent::SetIoTasks(form) => {
+                    self.submit_post(
+                        "set_io_tasks",
+                        "/api/config/io-tasks",
+                        Some(json!({ "tx": form.tx, "rx": form.rx })),
+                    );
+                }
+                UserIntent::SetCsiDelivery(form) => {
+                    self.submit_post(
+                        "set_csi_delivery",
+                        "/api/config/csi-delivery",
+                        Some(json!({
+                            "mode": form.mode.as_api_value(),
+                            "logging": form.logging,
+                        })),
+                    );
                 }
                 UserIntent::StartCollection { duration_seconds } => {
                     let duration = parse_optional_u64(&duration_seconds);
                     if duration_seconds.trim().is_empty() || duration.is_some() {
-                        self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                            label: "start_collection".to_owned(),
-                            method: HttpMethod::Post,
-                            base_url: self.state.base_http_url(),
-                            path: "/api/control/start".to_owned(),
-                            body: duration.map(|d| json!({ "duration": d })),
-                        }));
+                        self.submit_post(
+                            "start_collection",
+                            "/api/control/start",
+                            duration.map(|d| json!({ "duration": d })),
+                        );
                     } else {
-                        self.state.transient.error_message =
-                            "Duration must be a valid number of seconds".to_owned();
+                        self.set_error("Duration must be a valid number of seconds");
                     }
                 }
+                UserIntent::StopCollection => {
+                    self.submit_post("stop_collection", "/api/control/stop", None);
+                }
+                UserIntent::ShowStats => {
+                    self.submit_post("show_stats", "/api/control/stats", None);
+                }
                 UserIntent::ResetDevice => {
-                    self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
-                        label: "reset_device".to_owned(),
-                        method: HttpMethod::Post,
-                        base_url: self.state.base_http_url(),
-                        path: "/api/control/reset".to_owned(),
-                        body: None,
-                    }));
+                    self.submit_post("reset_device", "/api/control/reset", None);
                 }
                 UserIntent::ConnectWebSocket => {
                     self.core.submit(CoreCommand::ConnectWebSocket {
@@ -184,23 +169,63 @@ impl CsiClientApp {
         }
     }
 
+    fn submit_get(&self, label: &str, path: &str) {
+        self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
+            label: label.to_owned(),
+            method: HttpMethod::Get,
+            base_url: self.state.base_http_url(),
+            path: path.to_owned(),
+            body: None,
+        }));
+    }
+
+    fn submit_post(&self, label: &str, path: &str, body: Option<Value>) {
+        self.core.submit(CoreCommand::ExecuteApi(ApiRequest {
+            label: label.to_owned(),
+            method: HttpMethod::Post,
+            base_url: self.state.base_http_url(),
+            path: path.to_owned(),
+            body,
+        }));
+    }
+
+    fn set_error(&mut self, message: impl Into<String>) {
+        self.state.transient.error_message = message.into();
+    }
+
+    fn submit_set_wifi(&mut self, wifi: WiFiForm) {
+        if let Err(message) = validate_sta_field("STA SSID", &wifi.sta_ssid) {
+            self.set_error(message);
+            return;
+        }
+        if let Err(message) = validate_sta_field("STA password", &wifi.sta_password) {
+            self.set_error(message);
+            return;
+        }
+
+        let channel = parse_optional_u16(&wifi.channel);
+        if !wifi.channel.trim().is_empty() && channel.is_none() {
+            self.set_error("Wi-Fi channel must be a valid number");
+            return;
+        }
+
+        self.submit_post(
+            "set_wifi",
+            "/api/config/wifi",
+            Some(json!({
+                "mode": wifi.mode.as_api_value(),
+                "sta_ssid": empty_to_none(&wifi.sta_ssid),
+                "sta_password": empty_to_none(&wifi.sta_password),
+                "channel": channel,
+            })),
+        );
+    }
+
     /// Poll and apply core worker events without blocking the frame loop.
     fn process_core_events(&mut self) {
         while let Some(event) = self.core.try_recv() {
             match event {
                 CoreEvent::ApiResponse(response) => {
-                    if response.success {
-                        match response.label.as_str() {
-                            "start_collection" => {
-                                self.state.runtime.collection_active_estimate = true;
-                            }
-                            "reset_device" => {
-                                self.state.runtime.collection_active_estimate = false;
-                            }
-                            _ => {}
-                        }
-                    }
-
                     self.state.runtime.last_http_status = Some(response.status);
 
                     if response.success {
@@ -210,9 +235,10 @@ impl CsiClientApp {
                         );
                         self.state.transient.error_message.clear();
                     } else {
-                        self.state.transient.error_message = format!(
-                            "{} failed (HTTP {}): {}",
-                            response.label, response.status, response.message
+                        self.state.transient.error_message = format_error(
+                            &response.label,
+                            response.status,
+                            &response.message,
                         );
                     }
 
@@ -221,12 +247,68 @@ impl CsiClientApp {
                         response.label, response.status, response.message
                     ));
 
-                    if response.label == "fetch_config" {
-                        if let Some(data) = response.data {
-                            if let Some(config) = parse_device_config(data) {
-                                self.state.apply_device_config(config);
+                    if response.success {
+                        match response.label.as_str() {
+                            "fetch_config" => {
+                                if let Some(config) =
+                                    response.data.and_then(parse_envelope::<DeviceConfig>)
+                                {
+                                    let applied = self.state.apply_device_config(config);
+                                    if applied == 0 && !self.state.runtime.auto_resetting_cache {
+                                        self.state.runtime.auto_resetting_cache = true;
+                                        self.state.push_intent(UserIntent::ResetConfig);
+                                    } else {
+                                        self.state.runtime.auto_resetting_cache = false;
+                                    }
+                                } else {
+                                    self.state.runtime.auto_resetting_cache = false;
+                                }
                             }
+                            "fetch_info" => {
+                                if let Some(info) =
+                                    response.data.and_then(parse_envelope::<DeviceInfo>)
+                                {
+                                    self.state.runtime.firmware_verified = Some(true);
+                                    self.state.runtime.latest_info = Some(info);
+                                }
+                            }
+                            "fetch_status" => {
+                                if let Some(status) =
+                                    response.data.and_then(parse_envelope::<ControlStatus>)
+                                {
+                                    self.state.apply_control_status(status);
+                                }
+                            }
+                            "start_collection" => {
+                                self.state.runtime.collection_running = Some(true);
+                            }
+                            "stop_collection" => {
+                                self.state.runtime.collection_running = Some(false);
+                            }
+                            "reset_device" => {
+                                self.state.runtime.collection_running = Some(false);
+                                self.state.runtime.firmware_verified = None;
+                                self.state.runtime.latest_info = None;
+                            }
+                            // Any successful config-mutating POST repopulates a slot in the
+                            // server cache, so re-pull `/api/config` to keep the form in sync.
+                            "reset_config"
+                            | "set_wifi"
+                            | "set_traffic"
+                            | "set_csi"
+                            | "set_collection_mode"
+                            | "set_log_mode"
+                            | "set_rate"
+                            | "set_io_tasks"
+                            | "set_csi_delivery" => {
+                                self.state.push_intent(UserIntent::FetchConfig);
+                            }
+                            _ => {}
                         }
+                    } else if response.label == "fetch_info" && response.status != 0 {
+                        self.state.runtime.firmware_verified = Some(false);
+                    } else if response.label == "reset_config" {
+                        self.state.runtime.auto_resetting_cache = false;
                     }
                 }
                 CoreEvent::WebSocketConnected => {
@@ -252,17 +334,29 @@ impl CsiClientApp {
     /// Render the shared top panel (host/port fields, tabs, status and errors).
     fn render_top_bar(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("top_bar").show(ctx, |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 ui.label("Host");
-                ui.text_edit_singleline(&mut self.state.persistent.server_host);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.state.persistent.server_host)
+                        .desired_width(140.0),
+                );
                 ui.label("Port");
-                ui.text_edit_singleline(&mut self.state.persistent.server_port);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.state.persistent.server_port)
+                        .desired_width(60.0),
+                );
+                if ui.button("Fetch Info").clicked() {
+                    self.state.push_intent(UserIntent::FetchInfo);
+                }
                 if ui.button("Fetch Config").clicked() {
                     self.state.push_intent(UserIntent::FetchConfig);
                 }
+                if ui.button("Fetch Status").clicked() {
+                    self.state.push_intent(UserIntent::FetchStatus);
+                }
             });
 
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 tab_button(ui, &mut self.state, Tab::Dashboard, "Dashboard");
                 tab_button(ui, &mut self.state, Tab::Config, "Config");
                 tab_button(ui, &mut self.state, Tab::Control, "Control");
@@ -270,13 +364,22 @@ impl CsiClientApp {
             });
 
             if !self.state.transient.status_message.is_empty() {
-                ui.label(format!("Status: {}", self.state.transient.status_message));
+                ui.add(
+                    egui::Label::new(format!("Status: {}", self.state.transient.status_message))
+                        .wrap(),
+                );
             }
 
             if !self.state.transient.error_message.is_empty() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(220, 80, 80),
-                    format!("Error: {}", self.state.transient.error_message),
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "Error: {}",
+                            self.state.transient.error_message
+                        ))
+                        .color(egui::Color32::from_rgb(220, 80, 80)),
+                    )
+                    .wrap(),
                 );
             }
         });
@@ -307,17 +410,53 @@ impl eframe::App for CsiClientApp {
     }
 }
 
-/// Parse a `DeviceConfig` from a direct payload or common API envelope.
-fn parse_device_config(data: serde_json::Value) -> Option<DeviceConfig> {
-    if let Ok(config) = serde_json::from_value::<DeviceConfig>(data.clone()) {
-        return Some(config);
+/// Parse a typed payload from a direct value or the standard `data` envelope.
+fn parse_envelope<T: serde::de::DeserializeOwned>(data: serde_json::Value) -> Option<T> {
+    if let Ok(value) = serde_json::from_value::<T>(data.clone()) {
+        return Some(value);
     }
-
     if let Some(inner) = data.get("data") {
-        return serde_json::from_value::<DeviceConfig>(inner.clone()).ok();
+        return serde_json::from_value::<T>(inner.clone()).ok();
     }
-
     None
+}
+
+/// Reject SSID/password values the firmware tokenizer cannot accept.
+///
+/// Mirrors the server-side rules from §1.4 of the webserver spec so users
+/// see the failure inline rather than as a 400 round-trip.
+fn validate_sta_field(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    if value.len() > STA_FIELD_MAX_BYTES {
+        return Err(format!("{label} exceeds 32-byte firmware limit"));
+    }
+    if value.contains('\r') || value.contains('\n') {
+        return Err(format!("{label} must not contain newlines"));
+    }
+    if value.contains('\'') && value.contains('"') {
+        return Err(format!(
+            "{label} cannot contain both ' and \" — firmware tokenizer cannot disambiguate"
+        ));
+    }
+    Ok(())
+}
+
+/// Map known status codes onto operator-friendly hints.
+fn format_error(label: &str, status: u16, message: &str) -> String {
+    let hint = match status {
+        412 => Some("firmware not verified — try Fetch Info or Reset Device"),
+        503 => Some("ESP32 not connected, or operation not valid for current state"),
+        502 => Some("device responded but the info block was malformed"),
+        504 => Some("info block timed out — firmware may not be esp-csi-cli-rs"),
+        403 => Some("output mode is dump — switch to stream/both before opening WebSocket"),
+        _ => None,
+    };
+    match hint {
+        Some(h) => format!("{label} failed (HTTP {status}): {message} — {h}"),
+        None => format!("{label} failed (HTTP {status}): {message}"),
+    }
 }
 
 /// Parse an optional `u16` where empty input means `None`.
@@ -329,14 +468,14 @@ fn parse_optional_u16(input: &str) -> Option<u16> {
     trimmed.parse::<u16>().ok()
 }
 
-/// Parse a required `u16`.
-fn parse_required_u16(input: &str) -> Option<u16> {
-    input.trim().parse::<u16>().ok()
+/// Parse a required `u64`.
+fn parse_required_u64(input: &str) -> Option<u64> {
+    input.trim().parse::<u64>().ok()
 }
 
-/// Parse a required `u8`.
-fn parse_required_u8(input: &str) -> Option<u8> {
-    input.trim().parse::<u8>().ok()
+/// Parse a required `u32`.
+fn parse_required_u32(input: &str) -> Option<u32> {
+    input.trim().parse::<u32>().ok()
 }
 
 /// Parse an optional `u64` where empty input means `None`.
@@ -349,13 +488,11 @@ fn parse_optional_u64(input: &str) -> Option<u64> {
 }
 
 /// Convert user text to optional string while preserving significant whitespace.
-///
-/// Returns `None` only when the input is entirely whitespace.
-fn empty_to_none(input: String) -> Option<String> {
+fn empty_to_none(input: &str) -> Option<String> {
     if input.trim().is_empty() {
         None
     } else {
-        Some(input)
+        Some(input.to_owned())
     }
 }
 
