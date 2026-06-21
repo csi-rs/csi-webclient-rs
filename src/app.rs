@@ -209,6 +209,19 @@ impl CsiClientApp {
             return;
         }
 
+        if let Err(message) = validate_peer_mac(&wifi.peer_mac) {
+            self.set_error(message);
+            return;
+        }
+
+        // `peer_mac` is only meaningful for ESP-NOW modes. Send it (even empty,
+        // to clear back to auto) only for those modes so the server cache for
+        // station/sniffer isn't churned.
+        let esp_now = matches!(
+            wifi.mode,
+            crate::state::WiFiMode::EspNowCentral | crate::state::WiFiMode::EspNowPeripheral
+        );
+
         self.submit_post(
             "set_wifi",
             "/api/config/wifi",
@@ -217,6 +230,8 @@ impl CsiClientApp {
                 "sta_ssid": empty_to_none(&wifi.sta_ssid),
                 "sta_password": empty_to_none(&wifi.sta_password),
                 "channel": channel,
+                "peer_mac": esp_now.then(|| wifi.peer_mac.trim().to_owned()),
+                "ht40": esp_now.then(|| wifi.ht40.clone()),
             })),
         );
     }
@@ -441,6 +456,33 @@ fn validate_sta_field(label: &str, value: &str) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Reject malformed ESP-NOW peer MACs before the round-trip. Mirrors the
+/// firmware rule: six hex octets joined by `:` or `-`. Empty is valid and
+/// means "clear back to auto".
+fn validate_peer_mac(mac: &str) -> Result<(), String> {
+    let mac = mac.trim();
+    if mac.is_empty() {
+        return Ok(());
+    }
+    let sep = if mac.contains(':') {
+        ':'
+    } else if mac.contains('-') {
+        '-'
+    } else {
+        return Err("Peer MAC must use ':' or '-' separators (aa:bb:cc:dd:ee:ff)".to_owned());
+    };
+    let octets: Vec<&str> = mac.split(sep).collect();
+    let valid = octets.len() == 6
+        && octets
+            .iter()
+            .all(|o| o.len() == 2 && o.bytes().all(|b| b.is_ascii_hexdigit()));
+    if valid {
+        Ok(())
+    } else {
+        Err("Peer MAC must be aa:bb:cc:dd:ee:ff".to_owned())
+    }
 }
 
 /// Map known status codes onto operator-friendly hints.

@@ -62,7 +62,9 @@ or the last `reset-config`. Sub-section objects (`wifi`, `collection`,
   "wifi": {
     "mode": "sniffer",
     "channel": 6,
-    "sta_ssid": "MyNetwork"
+    "sta_ssid": "MyNetwork",
+    "peer_mac": "auto",
+    "ht40": "none"
   },
   "collection": {
     "mode": "collector",
@@ -122,7 +124,9 @@ Notes the client relies on:
   "mode": "station | sniffer | esp-now-central | esp-now-peripheral",
   "sta_ssid": "string or null",
   "sta_password": "string or null",
-  "channel": 6
+  "channel": 6,
+  "peer_mac": "aa:bb:cc:dd:ee:ff or empty string or null",
+  "ht40": "none | above | below"
 }
 ```
 
@@ -133,6 +137,10 @@ Client-side validation (mirrors firmware tokenizer rules):
 - Values containing both `'` and `"` are rejected — the firmware
   tokenizer cannot disambiguate them.
 - `channel` is optional; ignored by `station` (which inherits the AP's channel).
+- `peer_mac` / `ht40` are sent only for `esp-now-central` / `esp-now-peripheral`
+  modes (the firmware ignores them otherwise). `peer_mac` is validated as six
+  hex octets separated by `:` or `-`; an empty string clears the filter back to
+  automatic pairing (`auto`).
 
 ### `POST /api/config/traffic`
 
@@ -211,11 +219,13 @@ Both fields optional; omitted ones preserve the device's current value.
 ### `POST /api/config/csi-delivery`
 
 ```json
-{ "mode": "off | callback | async", "logging": true }
+{ "mode": "off | callback | async | raw", "logging": true }
 ```
 
 Both fields optional, but at least one must be present (the server
-returns `400` otherwise). Takes effect immediately on the firmware.
+returns `400` otherwise). `off`/`callback`/`async` take effect immediately on
+the firmware; `raw` is the zero-copy fast-path and only applies on the next
+`start` (no CSI data delivered or logged while it is active).
 
 ## Control Endpoints
 

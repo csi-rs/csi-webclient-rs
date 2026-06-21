@@ -129,6 +129,8 @@ pub enum CsiDeliveryMode {
     Off,
     Callback,
     Async,
+    /// Zero-copy fast-path; applies on the next `start`, delivers no CSI data.
+    Raw,
 }
 
 impl CsiDeliveryMode {
@@ -137,6 +139,7 @@ impl CsiDeliveryMode {
             Self::Off => "off",
             Self::Callback => "callback",
             Self::Async => "async",
+            Self::Raw => "raw",
         }
     }
 }
@@ -156,13 +159,33 @@ pub const PHY_RATES: &[&str] = &[
     "mcs6-lgi", "mcs7-lgi", "mcs0-sgi",
 ];
 
+/// HT40 forced-secondary-channel options for ESP-NOW (`POST /api/config/wifi`).
+pub const HT40_OPTIONS: &[&str] = &["none", "above", "below"];
+
 /// Editable Wi-Fi form values in the Config view.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct WiFiForm {
     pub mode: WiFiMode,
     pub sta_ssid: String,
     pub sta_password: String,
     pub channel: String,
+    /// ESP-NOW peer source MAC; empty means automatic pairing (`auto`).
+    pub peer_mac: String,
+    /// Forced ESP-NOW TX HT40 secondary channel: `none` | `above` | `below`.
+    pub ht40: String,
+}
+
+impl Default for WiFiForm {
+    fn default() -> Self {
+        Self {
+            mode: WiFiMode::default(),
+            sta_ssid: String::new(),
+            sta_password: String::new(),
+            channel: String::new(),
+            peer_mac: String::new(),
+            ht40: "none".to_owned(),
+        }
+    }
 }
 
 /// Editable traffic configuration form values.
@@ -358,6 +381,8 @@ pub struct DeviceWifiConfig {
     pub mode: Option<String>,
     pub channel: Option<u16>,
     pub sta_ssid: Option<String>,
+    pub peer_mac: Option<String>,
+    pub ht40: Option<String>,
 }
 
 /// Collection section of `GET /api/config`.
@@ -538,6 +563,17 @@ impl AppState {
                 self.persistent.wifi.sta_ssid = ssid.clone();
                 applied += 1;
             }
+            if let Some(mac) = &wifi.peer_mac {
+                // The server reports `auto` for the default (no explicit
+                // filter); show that as an empty editable field.
+                self.persistent.wifi.peer_mac =
+                    if mac == "auto" { String::new() } else { mac.clone() };
+                applied += 1;
+            }
+            if let Some(ht40) = &wifi.ht40 {
+                self.persistent.wifi.ht40 = ht40.clone();
+                applied += 1;
+            }
         }
 
         if let Some(collection) = config.collection.as_ref() {
@@ -640,6 +676,7 @@ impl AppState {
             self.persistent.csi_delivery.mode = match mode {
                 "off" => CsiDeliveryMode::Off,
                 "callback" => CsiDeliveryMode::Callback,
+                "raw" => CsiDeliveryMode::Raw,
                 _ => CsiDeliveryMode::Async,
             };
             applied += 1;
@@ -668,7 +705,10 @@ mod tests {
     #[test]
     fn device_config_parses_full_nested_response() {
         let json = r#"{
-            "wifi": { "mode": "sniffer", "channel": 6, "sta_ssid": "MyNetwork" },
+            "wifi": {
+                "mode": "esp-now-central", "channel": 6, "sta_ssid": "MyNetwork",
+                "peer_mac": "aa:bb:cc:dd:ee:ff", "ht40": "above"
+            },
             "collection": {
                 "mode": "collector", "traffic_hz": 100, "phy_rate": "mcs0-lgi",
                 "io_tx_enabled": true, "io_rx_enabled": true
@@ -680,18 +720,31 @@ mod tests {
                 "acquire_csi": 1, "acquire_csi_legacy": 0
             },
             "log_mode": "array-list",
-            "csi_delivery_mode": "async",
+            "csi_delivery_mode": "raw",
             "csi_logging_enabled": true
         }"#;
         let cfg: DeviceConfig = serde_json::from_str(json).expect("parse");
         let mut state = AppState::with_defaults();
         let applied = state.apply_device_config(cfg);
         assert!(applied > 0);
-        assert_eq!(state.persistent.wifi.mode, WiFiMode::Sniffer);
+        assert_eq!(state.persistent.wifi.mode, WiFiMode::EspNowCentral);
         assert_eq!(state.persistent.wifi.channel, "6");
+        assert_eq!(state.persistent.wifi.peer_mac, "aa:bb:cc:dd:ee:ff");
+        assert_eq!(state.persistent.wifi.ht40, "above");
         assert_eq!(state.persistent.traffic.frequency_hz, "100");
         assert!(!state.persistent.csi.disable_csi);
         assert!(state.persistent.csi.disable_csi_legacy);
+        assert_eq!(state.persistent.csi_delivery.mode, CsiDeliveryMode::Raw);
+    }
+
+    #[test]
+    fn device_config_maps_auto_peer_mac_to_empty_field() {
+        let json = r#"{ "wifi": { "mode": "sniffer", "peer_mac": "auto", "ht40": "none" } }"#;
+        let cfg: DeviceConfig = serde_json::from_str(json).expect("parse");
+        let mut state = AppState::with_defaults();
+        state.apply_device_config(cfg);
+        assert_eq!(state.persistent.wifi.peer_mac, "");
+        assert_eq!(state.persistent.wifi.ht40, "none");
     }
 
     #[test]

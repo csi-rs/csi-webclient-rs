@@ -1,5 +1,6 @@
 use crate::state::{
-    AppState, CollectionMode, CsiDeliveryMode, LogMode, OutputMode, PHY_RATES, UserIntent, WiFiMode,
+    AppState, CollectionMode, CsiDeliveryMode, HT40_OPTIONS, LogMode, OutputMode, PHY_RATES,
+    UserIntent, WiFiMode,
 };
 
 /// Render the configuration view.
@@ -45,6 +46,24 @@ fn render_body(ui: &mut egui::Ui, state: &mut AppState) {
                     .desired_width(60.0),
             );
         });
+
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Peer MAC (ESP-NOW)");
+            ui.add(
+                egui::TextEdit::singleline(&mut state.persistent.wifi.peer_mac)
+                    .hint_text("auto")
+                    .desired_width(160.0),
+            );
+            ui.label("HT40");
+            ht40_picker(ui, &mut state.persistent.wifi.ht40);
+        });
+        ui.add(
+            egui::Label::new(
+                "Peer MAC / HT40 apply to esp-now-central / esp-now-peripheral only; \
+                 leave Peer MAC empty for automatic pairing.",
+            )
+            .wrap(),
+        );
 
         if ui.button("Apply Wi-Fi Config").clicked() {
             state.push_intent(UserIntent::SetWifi(state.persistent.wifi.clone()));
@@ -255,6 +274,17 @@ fn csi_delivery_picker(ui: &mut egui::Ui, mode: &mut CsiDeliveryMode) {
             ui.selectable_value(mode, CsiDeliveryMode::Off, "off");
             ui.selectable_value(mode, CsiDeliveryMode::Callback, "callback");
             ui.selectable_value(mode, CsiDeliveryMode::Async, "async");
+            ui.selectable_value(mode, CsiDeliveryMode::Raw, "raw");
+        });
+}
+
+fn ht40_picker(ui: &mut egui::Ui, ht40: &mut String) {
+    egui::ComboBox::from_id_salt("ht40_combo")
+        .selected_text(ht40.as_str())
+        .show_ui(ui, |ui| {
+            for option in HT40_OPTIONS {
+                ui.selectable_value(ht40, (*option).to_owned(), *option);
+            }
         });
 }
 
