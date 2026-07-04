@@ -1,77 +1,79 @@
-use crate::state::{AppState, UserIntent};
+use crate::state::{DeviceAction, DeviceState};
 
-/// Render the control view.
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Control");
-    ui.separator();
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            render_body(ui, state);
-        });
+/// Render the control view for one device.
+pub fn render(ui: &mut egui::Ui, device: &mut DeviceState, actions: &mut Vec<DeviceAction>) {
+    ui.add(
+        egui::Label::new(format!("Control — {}", device.id))
+            .wrap(),
+    );
+    ui.add_space(10.0);
+    render_body(ui, device, actions);
 }
 
-fn render_body(ui: &mut egui::Ui, state: &mut AppState) {
+fn render_body(ui: &mut egui::Ui, device: &mut DeviceState, actions: &mut Vec<DeviceAction>) {
+    ui.strong("Collection");
+    ui.add_space(4.0);
+
     ui.horizontal_wrapped(|ui| {
         ui.label("Duration (seconds, optional)");
         ui.add(
-            egui::TextEdit::singleline(&mut state.persistent.start_duration_seconds)
+            egui::TextEdit::singleline(&mut device.forms.start_duration_seconds)
                 .desired_width(80.0),
         );
     });
+    ui.add_space(6.0);
 
     ui.horizontal_wrapped(|ui| {
         if ui.button("Start Collection").clicked() {
-            state.push_intent(UserIntent::StartCollection {
-                duration_seconds: state.persistent.start_duration_seconds.clone(),
+            actions.push(DeviceAction::StartCollection {
+                duration_seconds: device.forms.start_duration_seconds.clone(),
             });
         }
-
         if ui.button("Stop Collection").clicked() {
-            state.push_intent(UserIntent::StopCollection);
+            actions.push(DeviceAction::StopCollection);
         }
-
         if ui.button("Show Stats").clicked() {
-            state.push_intent(UserIntent::ShowStats);
+            actions.push(DeviceAction::ShowStats);
         }
     });
+
+    ui.add_space(10.0);
+    ui.strong("Device");
+    ui.add_space(4.0);
 
     ui.horizontal_wrapped(|ui| {
         if ui.button("Reset Device (RTS)").clicked() {
-            state.push_intent(UserIntent::ResetDevice);
+            actions.push(DeviceAction::ResetDevice);
         }
-
         if ui.button("Fetch Status").clicked() {
-            state.push_intent(UserIntent::FetchStatus);
+            actions.push(DeviceAction::FetchStatus);
         }
-
         if ui.button("Fetch Info").clicked() {
-            state.push_intent(UserIntent::FetchInfo);
+            actions.push(DeviceAction::FetchInfo);
         }
-
         if ui.button("Fetch Config").clicked() {
-            state.push_intent(UserIntent::FetchConfig);
+            actions.push(DeviceAction::FetchConfig);
         }
     });
 
-    ui.separator();
+    ui.add_space(10.0);
+    ui.strong("WebSocket");
+    ui.add_space(4.0);
 
     ui.horizontal_wrapped(|ui| {
-        if !state.runtime.ws_connected {
+        if !device.ws_connected {
             if ui.button("Connect WebSocket").clicked() {
-                state.push_intent(UserIntent::ConnectWebSocket);
+                actions.push(DeviceAction::ConnectWebSocket);
             }
         } else if ui.button("Disconnect WebSocket").clicked() {
-            state.push_intent(UserIntent::DisconnectWebSocket);
+            actions.push(DeviceAction::DisconnectWebSocket);
         }
-
         if ui.button("Clear Stream Frames").clicked() {
-            state.push_intent(UserIntent::ClearFrames);
+            actions.push(DeviceAction::ClearFrames);
         }
     });
 
-    ui.separator();
+    ui.add_space(8.0);
     ui.add(
         egui::Label::new(
             "Stop sends the literal 'q' byte (graceful). Reset pulses RTS and re-verifies firmware.",

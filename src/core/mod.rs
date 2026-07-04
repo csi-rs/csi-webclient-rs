@@ -3,6 +3,7 @@ pub mod messages;
 mod ws;
 
 use crate::core::messages::{CoreCommand, CoreEvent};
+use std::collections::HashMap;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 /// App-facing handle for the background core worker.
@@ -61,8 +62,8 @@ fn worker_loop(cmd_rx: Receiver<CoreCommand>, event_tx: Sender<CoreEvent>) {
         }
     };
 
-    let mut ws_stop_tx: Option<tokio::sync::oneshot::Sender<()>> = None;
-    let mut ws_task: Option<tokio::task::JoinHandle<()>> = None;
+    // One live WebSocket task per device id.
+    let mut ws_tasks: HashMap<String, WsTask> = HashMap::new();
 
     while let Ok(command) = cmd_rx.recv() {
         match command {
@@ -70,41 +71,46 @@ fn worker_loop(cmd_rx: Receiver<CoreCommand>, event_tx: Sender<CoreEvent>) {
                 let event = runtime.block_on(http::execute_api_request(request));
                 let _ = event_tx.send(event);
             }
-            CoreCommand::ConnectWebSocket { url } => {
-                stop_ws_task(&runtime, &mut ws_stop_tx, &mut ws_task);
+            CoreCommand::ConnectWebSocket { device_id, url } => {
+                // Replace any existing connection for this device.
+                if let Some(task) = ws_tasks.remove(&device_id) {
+                    stop_ws_task(&runtime, task);
+                }
 
                 let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
-                ws_stop_tx = Some(stop_tx);
-
                 let event_tx_clone = event_tx.clone();
-                ws_task = Some(runtime.spawn(async move {
-                    ws::run_ws_loop(url, stop_rx, event_tx_clone).await;
-                }));
+                let loop_device_id = device_id.clone();
+                let handle = runtime.spawn(async move {
+                    ws::run_ws_loop(loop_device_id, url, stop_rx, event_tx_clone).await;
+                });
+                ws_tasks.insert(device_id, WsTask { stop_tx, handle });
             }
-            CoreCommand::DisconnectWebSocket => {
-                stop_ws_task(&runtime, &mut ws_stop_tx, &mut ws_task);
+            CoreCommand::DisconnectWebSocket { device_id } => {
+                if let Some(task) = ws_tasks.remove(&device_id) {
+                    stop_ws_task(&runtime, task);
+                }
                 let _ = event_tx.send(CoreEvent::WebSocketDisconnected {
+                    device_id,
                     reason: "Disconnected".to_owned(),
                 });
             }
             CoreCommand::Shutdown => {
-                stop_ws_task(&runtime, &mut ws_stop_tx, &mut ws_task);
+                for (_, task) in ws_tasks.drain() {
+                    stop_ws_task(&runtime, task);
+                }
                 break;
             }
         }
     }
 }
 
-fn stop_ws_task(
-    runtime: &tokio::runtime::Runtime,
-    ws_stop_tx: &mut Option<tokio::sync::oneshot::Sender<()>>,
-    ws_task: &mut Option<tokio::task::JoinHandle<()>>,
-) {
-    if let Some(stop_tx) = ws_stop_tx.take() {
-        let _ = stop_tx.send(());
-    }
+/// A running WebSocket task and its stop signal.
+struct WsTask {
+    stop_tx: tokio::sync::oneshot::Sender<()>,
+    handle: tokio::task::JoinHandle<()>,
+}
 
-    if let Some(task) = ws_task.take() {
-        let _ = runtime.block_on(task);
-    }
+fn stop_ws_task(runtime: &tokio::runtime::Runtime, task: WsTask) {
+    let _ = task.stop_tx.send(());
+    let _ = runtime.block_on(task.handle);
 }

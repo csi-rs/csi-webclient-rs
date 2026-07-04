@@ -8,14 +8,14 @@ This project provides a native Rust GUI (egui/eframe) that talks to a running `c
 
 ## Features
 
-- Configure all major webserver/device settings through REST endpoints.
-- Control collection sessions (`start`, `reset`) without using raw serial tooling.
-- Connect to `/api/ws` and view incoming CSI frame previews in real time.
-- Switch runtime output behavior (`stream`, `dump`, `both`) from the UI.
-- Works with modern log modes from the reworked webserver API:
-  - `text`
-  - `array-list`
-  - `serialized`
+- Discover and manage **multiple ESP32 devices** via `GET /api/devices` with automatic hotplug polling (~2 s).
+- Per-device configuration, control, and WebSocket streaming under `/api/devices/{id}/...`.
+- Fleet-wide **Start All / Stop All** and multi-select synchronized collection (FDM mesh).
+- Connect per-device WebSockets and view incoming **serialized** CSI frame previews (COBS+postcard hex).
+- Record local **Parquet** exports (`csi_export_{id}_YYYYMMDD_HHmmss.parquet`) with a schema matching server-side dumps.
+- Switch runtime output behavior (`stream`, `dump`, `both`) per device from the UI.
+- Configure **esp-csi-cli-rs v0.7.0** Wi-Fi modes (`wifi-ap`, ESP-NOW fast simplex) and softAP options.
+- Apply two-device **pairing presets** (SoftAP lab, ESP-NOW fast/balanced) from the Devices tab.
 
 ## Architecture
 
@@ -24,6 +24,7 @@ The codebase intentionally separates responsibilities into three domains:
 - `src/state`: source of truth for app data and UI-visible state.
 - `src/ui`: rendering-only modules (dumb UI, no network/business orchestration).
 - `src/core`: side effects (HTTP requests, WebSocket loop, async runtime, channels).
+- `src/export`: host-side serialized CSI decoder and Parquet writer.
 
 Top-level intent orchestration and event application happen in `src/app.rs`.
 
@@ -31,22 +32,21 @@ Top-level intent orchestration and event application happen in `src/app.rs`.
 
 - Crate-level docs for docs.rs are maintained in `docs/CRATE_DOCS.md` (independent from this README).
 - HTTP/WebSocket API reference is maintained in `docs/HTTP_API.md`.
+- Migration guide from the flat v0.1.3 API: `MIGRATION.md`.
 
 ## Webserver Compatibility
 
-The client targets `csi-webserver` APIs described in the reworked README, including:
+The client targets **`csi-webserver` ≥ 0.1.5** (multi-device API + esp-csi-cli v0.7.0 Wi-Fi modes). Key endpoints:
 
-- `GET /api/config`
-- `POST /api/config/reset`
-- `POST /api/config/wifi`
-- `POST /api/config/traffic`
-- `POST /api/config/csi`
-- `POST /api/config/collection-mode`
-- `POST /api/config/log-mode`
-- `POST /api/config/output-mode`
-- `POST /api/control/start`
-- `POST /api/control/reset`
-- `GET /api/ws`
+- `GET /api/devices` — discover attached boards and live status
+- `GET /api/devices/{id}/info`
+- `GET /api/devices/{id}/config`
+- `GET /api/devices/{id}/control/status`
+- `POST /api/devices/{id}/config/*` — wifi, traffic, csi, collection-mode, output-mode, rate, io-tasks, csi-delivery, protocol, reset
+- `POST /api/devices/{id}/control/*` — start, stop, reset, stats
+- `GET /api/devices/{id}/ws` — per-device WebSocket (raw serialized CSI frames)
+
+The server always runs devices in **serialized** mode; there is no `log-mode` configuration in v0.1.4.
 
 ## Build
 
@@ -60,12 +60,17 @@ cargo build --release
 cargo run --release
 ```
 
-When the app starts, set host/port in the top bar to match your webserver (default `127.0.0.1:3000`), then use the tabs:
+When the app starts, set host/port in the top bar to match your webserver (default `127.0.0.1:3000`), then click **Connect**. The client polls for attached devices automatically.
 
-- `Config`: send configuration endpoints.
-- `Control`: start/reset and connect/disconnect WebSocket.
-- `Stream`: inspect frame counters and recent payload previews.
-- `Dashboard`: view status and event history.
+Tabs:
+
+- **Devices**: fleet overview, per-device start/stop, refresh, and event log.
+- **Dashboard**: per-device status, firmware info, and stream counters.
+- **Config**: send per-device configuration endpoints.
+- **Control**: start/stop collection, connect/disconnect WebSocket.
+- **Stream**: inspect frame counters, hex previews, and record local Parquet exports.
+
+Select one or more devices from the Devices tab or the top-bar combo box to drive the detail tabs side by side.
 
 ## Development
 
@@ -73,8 +78,6 @@ When the app starts, set host/port in the top bar to match your webserver (defau
 cargo check
 cargo test
 ```
-
-`cargo test` is optional in the current codebase (few/no tests yet), but should be preferred for core/state logic whenever new behavior is added.
 
 ## License
 
