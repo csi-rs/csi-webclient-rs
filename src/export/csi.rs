@@ -23,7 +23,7 @@ pub enum ChipVariant {
     Esp32Family,
     /// esp32c5 — the reduced layout without the c6-only fields ([`PacketBc5`]).
     Esp32c5,
-    /// esp32c6 — the reduced layout plus `he_sigb_len`/`cur_single_mpdu`/`rxmatch0`.
+    /// esp32c6 — the reduced layout plus `sigb_len`/`cur_single_mpdu`/`rxmatch0`.
     Esp32c6,
 }
 
@@ -170,7 +170,7 @@ pub struct PacketBc5 {
 }
 
 /// esp32c6 layout — the c5 layout plus the three `#[cfg(feature = "esp32c6")]`
-/// fields (`he_sigb_len`, `cur_single_mpdu`, `rxmatch0`) at their declared
+/// fields (`sigb_len`, `cur_single_mpdu`, `rxmatch0`) at their declared
 /// positions. Field order is the wire order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PacketBc6 {
@@ -182,7 +182,7 @@ pub struct PacketBc6 {
     pub sig_len: u32,
     pub rx_state: u32,
     pub dump_len: u32,
-    pub he_sigb_len: u32,
+    pub sigb_len: u32,
     pub cur_single_mpdu: u32,
     pub cur_bb_format: u32,
     pub rx_channel_estimate_info_vld: u32,
@@ -251,7 +251,7 @@ pub struct DecodedCsi {
     pub rxmatch1: Option<u32>,
 
     // ── c6 only ─────────────────────────────────────────────────────────
-    pub he_sigb_len: Option<u32>,
+    pub sigb_len: Option<u32>,
     pub cur_single_mpdu: Option<u32>,
     pub rxmatch0: Option<u32>,
 }
@@ -294,7 +294,7 @@ impl From<PacketA> for DecodedCsi {
             rxmatch3: None,
             rxmatch2: None,
             rxmatch1: None,
-            he_sigb_len: None,
+            sigb_len: None,
             cur_single_mpdu: None,
             rxmatch0: None,
         }
@@ -339,7 +339,7 @@ impl From<PacketBc5> for DecodedCsi {
             rxmatch3: Some(p.rxmatch3),
             rxmatch2: Some(p.rxmatch2),
             rxmatch1: Some(p.rxmatch1),
-            he_sigb_len: None,
+            sigb_len: None,
             cur_single_mpdu: None,
             rxmatch0: None,
         }
@@ -384,7 +384,7 @@ impl From<PacketBc6> for DecodedCsi {
             rxmatch3: Some(p.rxmatch3),
             rxmatch2: Some(p.rxmatch2),
             rxmatch1: Some(p.rxmatch1),
-            he_sigb_len: Some(p.he_sigb_len),
+            sigb_len: Some(p.sigb_len),
             cur_single_mpdu: Some(p.cur_single_mpdu),
             rxmatch0: Some(p.rxmatch0),
         }
@@ -510,7 +510,7 @@ mod tests {
             sig_len: 64,
             rx_state: 0,
             dump_len: 100,
-            he_sigb_len: 7,
+            sigb_len: 7,
             cur_single_mpdu: 1,
             cur_bb_format: 2,
             rx_channel_estimate_info_vld: 1,
@@ -535,7 +535,7 @@ mod tests {
 
         let out = decode(body, ChipVariant::Esp32c6).unwrap();
         assert_eq!(out.mac, [1, 2, 3, 4, 5, 6]);
-        assert_eq!(out.he_sigb_len, Some(7));
+        assert_eq!(out.sigb_len, Some(7));
         assert_eq!(out.rxmatch0, Some(1));
         assert_eq!(out.sgi, None);
         assert_eq!(out.csi_data, vec![-1, 1]);

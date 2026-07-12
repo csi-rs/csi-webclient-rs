@@ -245,7 +245,7 @@ impl ParquetSink {
             u32_opt(&|c| c.rxmatch2),
             u32_opt(&|c| c.rxmatch1),
             // c6 only
-            u32_opt(&|c| c.he_sigb_len),
+            u32_opt(&|c| c.sigb_len),
             u32_opt(&|c| c.cur_single_mpdu),
             u32_opt(&|c| c.rxmatch0),
         ];
@@ -336,7 +336,7 @@ fn build_schema() -> Arc<Schema> {
         opt_u32("rxmatch2"),
         opt_u32("rxmatch1"),
         // c6 only
-        opt_u32("he_sigb_len"),
+        opt_u32("sigb_len"),
         opt_u32("cur_single_mpdu"),
         opt_u32("rxmatch0"),
     ];
