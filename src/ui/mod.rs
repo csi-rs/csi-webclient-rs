@@ -6,4 +6,7 @@
 pub mod config;
 pub mod control;
 pub mod dashboard;
+pub mod detail;
+pub mod devices;
+pub mod selector;
 pub mod stream;

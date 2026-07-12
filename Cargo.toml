@@ -1,6 +1,6 @@
 [package]
 name = "csi-webclient"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 description = "Desktop egui client for csi-webserver REST/WebSocket control and CSI stream monitoring"
 documentation = "https://docs.rs/csi-webclient"
@@ -8,15 +8,19 @@ homepage = "https://github.com/csi-rs/csi-webclient-rs"
 repository = "https://github.com/csi-rs/csi-webclient-rs"
 keywords = ["csi", "egui", "desktop", "websocket", "client"]
 categories = ["gui", "network-programming"]
+exclude = ["*.parquet", "run_test", "ap", "sta"]
 rust-version = "1.85"
 readme = "README.md"
 license-file = "LICENSE"
 
 [dependencies]
+arrow = "56"
 chrono = "0.4.42"
 eframe = { version = "0.33.3", default-features = true }
 egui = "0.33.3"
 futures-util = "0.3.31"
+parquet = { version = "56", features = ["arrow"] }
+postcard = { version = "1", features = ["use-std"] }
 reqwest = { version = "0.12.23", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"

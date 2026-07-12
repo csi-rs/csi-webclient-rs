@@ -1,98 +1,88 @@
-use crate::state::AppState;
+use crate::state::DeviceState;
 
-/// Render the dashboard view.
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Dashboard");
-    ui.separator();
+/// Render the dashboard view for one device.
+pub fn render(ui: &mut egui::Ui, device: &DeviceState) {
+    ui.add(
+        egui::Label::new(format!("Dashboard — {}", device.id))
+            .wrap(),
+    );
+    ui.add_space(10.0);
 
-    ui.horizontal_wrapped(|ui| {
-        ui.strong("Serial:");
-        ui.label(format_tristate(state.runtime.serial_connected, "connected", "disconnected"));
-        ui.separator();
+    ui.strong("Connection");
+    ui.add_space(4.0);
+    stat_row(ui, "Serial", format_tristate(device.serial_connected, "connected", "disconnected"));
+    if let Some(mac) = &device.mac {
+        stat_row(ui, "MAC", mac.clone());
+    }
+    stat_row(ui, "Port", device.port_path.clone().unwrap_or_else(|| "?".to_owned()));
+    if let Some(baud) = device.baud_rate {
+        stat_row(ui, "Baud", baud.to_string());
+    }
+    stat_row(
+        ui,
+        "Firmware",
+        format_tristate(device.firmware_verified, "verified", "unverified"),
+    );
+    stat_row(
+        ui,
+        "Collection",
+        format_tristate(device.collection_running, "running", "idle"),
+    );
 
-        ui.strong("Firmware:");
-        ui.label(format_tristate(state.runtime.firmware_verified, "verified", "unverified"));
-        ui.separator();
-
-        ui.strong("Collection:");
-        ui.label(format_tristate(state.runtime.collection_running, "running", "idle"));
-        ui.separator();
-
-        ui.strong("Port:");
-        ui.label(state.runtime.port_path.clone().unwrap_or_else(|| "?".to_owned()));
-    });
-
-    ui.separator();
-
-    if let Some(info) = &state.runtime.latest_info {
-        ui.horizontal_wrapped(|ui| {
-            ui.strong("Name:");
-            ui.label(info.name.clone().unwrap_or_default());
-            ui.separator();
-
-            ui.strong("Version:");
-            ui.label(info.version.clone().unwrap_or_default());
-            ui.separator();
-
-            ui.strong("Chip:");
-            ui.label(info.chip.clone().unwrap_or_default());
-            ui.separator();
-
-            ui.strong("Protocol:");
-            ui.label(
-                info.protocol
-                    .map(|v| v.to_string())
-                    .unwrap_or_else(|| "?".to_owned()),
-            );
-            ui.separator();
-
-            ui.strong("Features:");
-            ui.label(info.features.join(", "));
-        });
-        ui.separator();
+    if let Some(info) = &device.latest_info {
+        ui.add_space(10.0);
+        ui.strong("Firmware info");
+        ui.add_space(4.0);
+        stat_row(ui, "Name", info.name.clone().unwrap_or_default());
+        stat_row(ui, "Version", info.version.clone().unwrap_or_default());
+        stat_row(ui, "Chip", info.chip.clone().unwrap_or_default());
+        stat_row(
+            ui,
+            "Protocol",
+            info.protocol
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "?".to_owned()),
+        );
+        stat_row(ui, "Features", info.features.join(", "));
     }
 
-    ui.horizontal_wrapped(|ui| {
-        ui.strong("Collection role:");
-        ui.label(state.persistent.collection_mode.as_api_value());
-        ui.separator();
+    ui.add_space(10.0);
+    ui.strong("Session");
+    ui.add_space(4.0);
+    stat_row(
+        ui,
+        "Collection role",
+        device.forms.collection_mode.as_api_value().to_owned(),
+    );
+    stat_row(
+        ui,
+        "Output mode",
+        device.forms.output_mode.as_api_value().to_owned(),
+    );
 
-        ui.strong("Output mode:");
-        ui.label(state.persistent.output_mode.as_api_value());
-        ui.separator();
+    ui.add_space(10.0);
+    ui.strong("Stream");
+    ui.add_space(4.0);
+    stat_row(
+        ui,
+        "WebSocket",
+        if device.ws_connected {
+            "connected".to_owned()
+        } else {
+            "disconnected".to_owned()
+        },
+    );
+    stat_row(ui, "Frames", device.frames_received.to_string());
+    stat_row(ui, "Bytes", device.bytes_received.to_string());
+}
 
-        ui.strong("Log mode:");
-        ui.label(state.persistent.log_mode.as_api_value());
+fn stat_row(ui: &mut egui::Ui, label: &str, value: String) {
+    ui.horizontal(|ui| {
+        ui.label(format!("{label}:"));
+        ui.add_space(8.0);
+        ui.add(egui::Label::new(value).wrap());
     });
-
-    ui.separator();
-
-    ui.horizontal_wrapped(|ui| {
-        ui.label(format!("HTTP Base: {}", state.base_http_url()));
-        ui.separator();
-        ui.label(format!(
-            "WebSocket: {}",
-            if state.runtime.ws_connected {
-                "Connected"
-            } else {
-                "Disconnected"
-            }
-        ));
-        ui.separator();
-        ui.label(format!("Frames: {}", state.runtime.frames_received));
-        ui.separator();
-        ui.label(format!("Bytes: {}", state.runtime.bytes_received));
-    });
-
-    ui.separator();
-    ui.label("Recent events");
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            for line in state.runtime.events.iter().rev().take(80) {
-                ui.add(egui::Label::new(line).wrap());
-            }
-        });
+    ui.add_space(2.0);
 }
 
 fn format_tristate(value: Option<bool>, true_label: &str, false_label: &str) -> String {

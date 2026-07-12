@@ -2,5 +2,7 @@
 
 pub mod app;
 pub mod core;
+pub mod export;
+pub mod profile;
 pub mod state;
 pub mod ui;

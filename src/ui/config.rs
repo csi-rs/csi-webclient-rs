@@ -1,239 +1,481 @@
+use crate::profile::ClientProfile;
 use crate::state::{
-    AppState, CollectionMode, CsiDeliveryMode, HT40_OPTIONS, LogMode, OutputMode, PHY_RATES,
-    UserIntent, WiFiMode,
+    CollectionMode, CsiDeliveryMode, CsiForm, DeviceAction, DeviceState, Ht40Mode, OutputMode,
+    PHY_RATES, WiFiMode, WifiProtocol,
 };
 
-/// Render the configuration view.
-pub fn render(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.heading("Configuration");
-    ui.separator();
-
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            render_body(ui, state);
-        });
+/// Render the configuration view for one device.
+///
+/// Pushes per-device actions into `actions`; the caller addresses them to the
+/// selected device id after rendering. `all_ids` is the full attached-device
+/// list, used by the "Copy from" picker. `profile` supplies any extra
+/// protocol options and CSI-preset buttons.
+pub fn render(
+    ui: &mut egui::Ui,
+    device: &mut DeviceState,
+    all_ids: &[String],
+    actions: &mut Vec<DeviceAction>,
+    profile: &dyn ClientProfile,
+) {
+    ui.add(
+        egui::Label::new(format!("Configuration — {}", device.id))
+            .wrap(),
+    );
+    ui.add_space(8.0);
+    render_body(ui, device, actions, profile);
+    render_persistence(ui, device, all_ids, actions);
 }
 
-fn render_body(ui: &mut egui::Ui, state: &mut AppState) {
-    ui.collapsing("Wi-Fi", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Mode");
-            wifi_mode_picker(ui, &mut state.persistent.wifi.mode);
+fn render_body(
+    ui: &mut egui::Ui,
+    device: &mut DeviceState,
+    actions: &mut Vec<DeviceAction>,
+    profile: &dyn ClientProfile,
+) {
+    let device_id = device.id.clone();
+    let supports_v07 = device.supports_v07_modes();
+    let supports_unsolicited = device.supports_unsolicited();
+    let forms = &mut device.forms;
+    let field_width = text_field_width(ui, 140.0);
+
+    section_header(ui, "Wi-Fi", |ui| {
+        form_row(ui, "Mode", |ui| {
+            wifi_mode_picker(ui, &device_id, supports_v07, &mut forms.wifi.mode);
         });
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("STA SSID");
-            ui.add(
-                egui::TextEdit::singleline(&mut state.persistent.wifi.sta_ssid)
-                    .desired_width(220.0),
+        if forms.wifi.mode.requires_v07() && !supports_v07 {
+            ui.colored_label(
+                egui::Color32::YELLOW,
+                "Selected mode requires esp-csi-cli-rs ≥ 0.7.0 on this device.",
             );
-        });
+        }
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("STA Password");
-            ui.add(
-                egui::TextEdit::singleline(&mut state.persistent.wifi.sta_password)
-                    .password(true)
-                    .desired_width(220.0),
-            );
-        });
+        if matches!(forms.wifi.mode, WiFiMode::Station) {
+            form_row(ui, "STA SSID", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut forms.wifi.sta_ssid).desired_width(field_width),
+                );
+            });
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Channel");
-            ui.add(
-                egui::TextEdit::singleline(&mut state.persistent.wifi.channel)
-                    .desired_width(60.0),
-            );
-        });
+            form_row(ui, "STA Password", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut forms.wifi.sta_password)
+                        .password(true)
+                        .desired_width(field_width),
+                );
+            });
+        }
 
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Peer MAC (ESP-NOW)");
+        if matches!(forms.wifi.mode, WiFiMode::WifiAp) {
+            form_row(ui, "AP SSID", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut forms.wifi.ap_ssid).desired_width(field_width),
+                );
+            });
+
+            form_row(ui, "AP Password", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut forms.wifi.ap_password)
+                        .password(true)
+                        .desired_width(field_width),
+                );
+            });
+
+            ui.checkbox(&mut forms.wifi.ap_dhcp, "AP DHCP (built-in server)");
+
+            form_row(ui, "AP leases", |ui| {
+                ui.add(egui::DragValue::new(&mut forms.wifi.ap_leases).range(1..=8))
+                    .on_hover_text(
+                        "DHCP lease pool size (1-8). With more than one lease the \
+                         ICMP flood targets every associated station; 1 restores \
+                         the legacy single-target flood.",
+                    );
+            });
+
+            ui.checkbox(&mut forms.wifi.ap_burst, "Sync burst flood")
+                .on_hover_text(
+                    "Every flood tick sends one frame back-to-back to every \
+                     associated station (time-aligned multi-receiver CSI). \
+                     Each station then sees the full traffic rate, so total \
+                     airtime = frequency × leases — lower the traffic rate if \
+                     the channel saturates. Off = round-robin one station per \
+                     tick.",
+                );
+        }
+
+        form_row(ui, "Channel", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut forms.wifi.channel).desired_width(80.0));
+        });
+        if forms.wifi.mode.channel_is_hint() {
             ui.add(
-                egui::TextEdit::singleline(&mut state.persistent.wifi.peer_mac)
-                    .hint_text("auto")
-                    .desired_width(160.0),
+                egui::Label::new(
+                    "Optional pre-association band-selection hint (e.g. 6 on 2.4 GHz, or a \
+                     5 GHz channel on the C5). Leave blank to inherit the channel from the \
+                     associated AP.",
+                )
+                .wrap(),
             );
-            ui.label("HT40");
-            ht40_picker(ui, &mut state.persistent.wifi.ht40);
+            ui.add_space(6.0);
+        }
+
+        if forms.wifi.mode.is_esp_now() {
+            form_row(ui, "Peer MAC", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut forms.wifi.peer_mac)
+                        .hint_text("auto")
+                        .desired_width(field_width),
+                );
+            });
+
+            form_row(ui, "HT40 secondary", |ui| {
+                ht40_picker(ui, &mut forms.wifi.ht40);
+            });
+
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    "Peer MAC / HT40 apply to all ESP-NOW modes; empty MAC = auto.",
+                )
+                .wrap(),
+            );
+        }
+
+        ui.add_space(8.0);
+        if ui.button("Apply Wi-Fi Config").clicked() {
+            actions.push(DeviceAction::SetWifi(forms.wifi.clone()));
+        }
+
+        ui.add_space(12.0);
+        let extra_protocols = profile.extra_protocols();
+        form_row(ui, "PHY Protocol", |ui| {
+            protocol_picker(ui, &mut forms.protocol, extra_protocols);
+            if ui.button("Apply Protocol").clicked() {
+                actions.push(DeviceAction::SetProtocol(forms.protocol));
+            }
         });
         ui.add(
             egui::Label::new(
-                "Peer MAC / HT40 apply to esp-now-central / esp-now-peripheral only; \
-                 leave Peer MAC empty for automatic pairing.",
+                "Applied at the start of each run. Default lr (Long-Range) is proprietary; \
+                 use n to associate with a standard AP in station mode.",
             )
             .wrap(),
         );
-
-        if ui.button("Apply Wi-Fi Config").clicked() {
-            state.push_intent(UserIntent::SetWifi(state.persistent.wifi.clone()));
-        }
     });
 
-    ui.separator();
-
-    ui.collapsing("Traffic", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Frequency (Hz)");
+    section_header(ui, "Traffic", |ui| {
+        form_row(ui, "Frequency (Hz)", |ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut state.persistent.traffic.frequency_hz)
-                    .desired_width(100.0),
+                egui::TextEdit::singleline(&mut forms.traffic.frequency_hz).desired_width(120.0),
             );
             if ui.button("Apply Traffic Config").clicked() {
-                state.push_intent(UserIntent::SetTraffic(state.persistent.traffic.clone()));
-            }
-        });
-    });
-
-    ui.separator();
-
-    ui.collapsing("CSI Flags", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut state.persistent.csi.disable_lltf, "disable_lltf");
-            ui.checkbox(&mut state.persistent.csi.disable_htltf, "disable_htltf");
-            ui.checkbox(
-                &mut state.persistent.csi.disable_stbc_htltf,
-                "disable_stbc_htltf",
-            );
-            ui.checkbox(
-                &mut state.persistent.csi.disable_ltf_merge,
-                "disable_ltf_merge",
-            );
-            ui.checkbox(&mut state.persistent.csi.disable_csi, "disable_csi");
-            ui.checkbox(
-                &mut state.persistent.csi.disable_csi_legacy,
-                "disable_csi_legacy",
-            );
-            ui.checkbox(
-                &mut state.persistent.csi.disable_csi_ht20,
-                "disable_csi_ht20",
-            );
-            ui.checkbox(
-                &mut state.persistent.csi.disable_csi_ht40,
-                "disable_csi_ht40",
-            );
-            ui.checkbox(&mut state.persistent.csi.disable_csi_su, "disable_csi_su");
-            ui.checkbox(&mut state.persistent.csi.disable_csi_mu, "disable_csi_mu");
-            ui.checkbox(&mut state.persistent.csi.disable_csi_dcm, "disable_csi_dcm");
-            ui.checkbox(
-                &mut state.persistent.csi.disable_csi_beamformed,
-                "disable_csi_beamformed",
-            );
-        });
-
-        ui.horizontal_wrapped(|ui| {
-            ui.label("csi_he_stbc (u32)");
-            ui.add(
-                egui::TextEdit::singleline(&mut state.persistent.csi.csi_he_stbc)
-                    .desired_width(80.0),
-            );
-            ui.label("val_scale_cfg (u32)");
-            ui.add(
-                egui::TextEdit::singleline(&mut state.persistent.csi.val_scale_cfg)
-                    .desired_width(80.0),
-            );
-        });
-
-        if ui.button("Apply CSI Config").clicked() {
-            state.push_intent(UserIntent::SetCsi(state.persistent.csi.clone()));
-        }
-    });
-
-    ui.separator();
-
-    ui.collapsing("PHY Rate (ESP-NOW only)", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Rate");
-            phy_rate_picker(ui, &mut state.persistent.phy_rate.rate);
-            if ui.button("Apply Rate").clicked() {
-                state.push_intent(UserIntent::SetPhyRate(state.persistent.phy_rate.clone()));
+                actions.push(DeviceAction::SetTraffic(forms.traffic.clone()));
             }
         });
         ui.add(
             egui::Label::new(
-                "Honored by esp-now-central / esp-now-peripheral; ignored by station/sniffer.",
+                "For AP + station lab pairs: AP floods at 1000 Hz, station stays \
+                 receive-only (frequency 0).",
+            )
+            .wrap(),
+        );
+
+        // The flood-kind toggle only exists for the WiFi infra modes: ESP-NOW
+        // modes transmit their own frames and sniffers generate no traffic.
+        if matches!(forms.wifi.mode, WiFiMode::WifiAp | WiFiMode::Station) {
+            let traffic_on = forms
+                .traffic
+                .frequency_hz
+                .trim()
+                .parse::<u64>()
+                .is_ok_and(|hz| hz > 0);
+            ui.add_space(4.0);
+            // Moot while traffic generation is off (frequency 0/blank), and
+            // unsupported (whole set-traffic command rejected!) below 0.7.0.
+            ui.add_enabled_ui(traffic_on && supports_unsolicited, |ui| {
+                ui.checkbox(
+                    &mut forms.traffic.unsolicited,
+                    "Unsolicited echo-reply flood (one-directional)",
+                );
+            });
+            if !supports_unsolicited {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Unsolicited flood requires esp-csi-cli-rs ≥ 0.7.0 on this device — \
+                     reflash to use it (the flag is not sent to older firmware).",
+                );
+            }
+            ui.add(
+                egui::Label::new(
+                    "Floods unsolicited echo replies the peer silently ignores: no reply \
+                     contention, stable offered rate — but this device captures no CSI \
+                     back from the peer; collect on the peer instead.",
+                )
+                .wrap(),
+            );
+            if traffic_on
+                && forms.traffic.unsolicited
+                && matches!(forms.collection_mode, CollectionMode::Collector)
+            {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "Unsolicited flood + Collector: this node will capture ~no CSI. \
+                     Set Collector on the peer, or disable the unsolicited flood.",
+                );
+            }
+        }
+    });
+
+    section_header(ui, "CSI Flags", |ui| {
+        render_csi_flags(ui, &mut forms.csi);
+
+        ui.add_space(8.0);
+        form_row(ui, "val_scale_cfg (u32)", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut forms.csi.val_scale_cfg).desired_width(80.0),
+            );
+        });
+
+        ui.add_space(8.0);
+        if ui.button("Apply CSI Config").clicked() {
+            actions.push(DeviceAction::SetCsi(forms.csi.clone()));
+        }
+        // Profile-supplied CSI-preset buttons (none in the standard build).
+        profile.extra_preset_buttons(ui, actions);
+    });
+
+    section_header(ui, "PHY Rate", |ui| {
+        form_row(ui, "Rate", |ui| {
+            phy_rate_picker(ui, &mut forms.phy_rate.rate);
+            if ui.button("Apply Rate").clicked() {
+                actions.push(DeviceAction::SetPhyRate(forms.phy_rate.clone()));
+            }
+        });
+        ui.add(
+            egui::Label::new(
+                "Honored by all ESP-NOW modes (incl. fast simplex) and wifi-ap/sniffer; \
+                 ignored by station.",
             )
             .wrap(),
         );
     });
 
-    ui.separator();
-
-    ui.collapsing("IO Tasks", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.checkbox(&mut state.persistent.io_tasks.tx, "TX (traffic generation)");
-            ui.checkbox(&mut state.persistent.io_tasks.rx, "RX (CSI capture)");
-        });
+    section_header(ui, "IO Tasks", |ui| {
+        ui.checkbox(&mut forms.io_tasks.tx, "TX (traffic generation)");
+        ui.add_space(4.0);
+        ui.checkbox(&mut forms.io_tasks.rx, "RX (CSI capture)");
+        ui.add_space(8.0);
         if ui.button("Apply IO Tasks").clicked() {
-            state.push_intent(UserIntent::SetIoTasks(state.persistent.io_tasks.clone()));
+            actions.push(DeviceAction::SetIoTasks(forms.io_tasks.clone()));
         }
     });
 
-    ui.separator();
-
-    ui.collapsing("CSI Delivery", |ui| {
-        ui.horizontal_wrapped(|ui| {
-            ui.label("Mode");
-            csi_delivery_picker(ui, &mut state.persistent.csi_delivery.mode);
-            ui.checkbox(
-                &mut state.persistent.csi_delivery.logging,
-                "inline UART logging",
-            );
+    section_header(ui, "CSI Delivery", |ui| {
+        form_row(ui, "Mode", |ui| {
+            csi_delivery_picker(ui, &mut forms.csi_delivery.mode);
         });
+        ui.checkbox(&mut forms.csi_delivery.logging, "inline UART logging");
+        ui.add_space(8.0);
         if ui.button("Apply CSI Delivery").clicked() {
-            state.push_intent(UserIntent::SetCsiDelivery(
-                state.persistent.csi_delivery.clone(),
-            ));
+            actions.push(DeviceAction::SetCsiDelivery(forms.csi_delivery.clone()));
         }
     });
 
-    ui.separator();
+    section_header(ui, "Collection & Output", |ui| {
+        form_row(ui, "Collection Mode", |ui| {
+            collection_mode_picker(ui, &mut forms.collection_mode);
+            if ui.button("Apply").clicked() {
+                actions.push(DeviceAction::SetCollectionMode(forms.collection_mode));
+            }
+        });
 
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Collection Mode");
-        collection_mode_picker(ui, &mut state.persistent.collection_mode);
-        if ui.button("Apply").clicked() {
-            state.push_intent(UserIntent::SetCollectionMode(
-                state.persistent.collection_mode,
-            ));
-        }
+        form_row(ui, "Output Mode", |ui| {
+            output_mode_picker(ui, &mut forms.output_mode);
+            if ui.button("Apply").clicked() {
+                actions.push(DeviceAction::SetOutputMode(forms.output_mode));
+            }
+        });
     });
 
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Log Mode");
-        log_mode_picker(ui, &mut state.persistent.log_mode);
-        if ui.button("Apply").clicked() {
-            state.push_intent(UserIntent::SetLogMode(state.persistent.log_mode));
-        }
-    });
-
-    ui.horizontal_wrapped(|ui| {
-        ui.label("Output Mode");
-        output_mode_picker(ui, &mut state.persistent.output_mode);
-        if ui.button("Apply").clicked() {
-            state.push_intent(UserIntent::SetOutputMode(state.persistent.output_mode));
-        }
-    });
-
+    ui.add_space(12.0);
     ui.horizontal_wrapped(|ui| {
         if ui.button("Reset Config Defaults").clicked() {
-            state.push_intent(UserIntent::ResetConfig);
+            actions.push(DeviceAction::ResetConfig);
         }
-
         if ui.button("Refresh Config").clicked() {
-            state.push_intent(UserIntent::FetchConfig);
+            actions.push(DeviceAction::FetchConfig);
         }
     });
 }
 
-fn wifi_mode_picker(ui: &mut egui::Ui, mode: &mut WiFiMode) {
-    egui::ComboBox::from_id_salt("wifi_mode_combo")
+/// Save/load config snapshots and copy configuration between devices.
+fn render_persistence(
+    ui: &mut egui::Ui,
+    device: &mut DeviceState,
+    all_ids: &[String],
+    actions: &mut Vec<DeviceAction>,
+) {
+    let device_id = device.id.clone();
+    let field_width = text_field_width(ui, 140.0);
+
+    section_header(ui, "Save / Load / Copy", |ui| {
+        form_row(ui, "Config file", |ui| {
+            ui.add(
+                egui::TextEdit::singleline(&mut device.config_path)
+                    .hint_text("auto-named in export dir")
+                    .desired_width(field_width),
+            );
+        });
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Save to File").clicked() {
+                actions.push(DeviceAction::SaveConfigFile {
+                    path: device.config_path.clone(),
+                });
+            }
+            if ui.button("Load & Apply").clicked() {
+                actions.push(DeviceAction::LoadConfigFile {
+                    path: device.config_path.clone(),
+                });
+            }
+            if ui.button("Apply All to Device").clicked() {
+                actions.push(DeviceAction::ApplyFullConfig);
+            }
+        });
+        ui.add_space(4.0);
+        ui.add(
+            egui::Label::new(
+                "Save writes the form values above as JSON (including Wi-Fi passwords, in \
+                 plain text). Load fills the form and pushes every section to the device; \
+                 Apply All re-pushes the current form after manual edits.",
+            )
+            .wrap(),
+        );
+
+        let others: Vec<&String> = all_ids.iter().filter(|id| **id != device_id).collect();
+        if !others.is_empty() {
+            ui.add_space(8.0);
+            form_row(ui, "Copy from", |ui| {
+                if !others.iter().any(|id| **id == device.copy_source) {
+                    device.copy_source = (*others[0]).clone();
+                }
+                egui::ComboBox::from_id_salt(format!("copy_source_combo_{device_id}"))
+                    .selected_text(device.copy_source.clone())
+                    .show_ui(ui, |ui| {
+                        for id in &others {
+                            ui.selectable_value(&mut device.copy_source, (*id).clone(), *id);
+                        }
+                    });
+                if ui.button("Copy & Apply").clicked() {
+                    actions.push(DeviceAction::CopyConfigFrom {
+                        source_id: device.copy_source.clone(),
+                    });
+                }
+            });
+            ui.add(
+                egui::Label::new(
+                    "Copies the source device's form values onto this device and applies \
+                     them, including the ESP-NOW peer MAC — clear it afterwards if the \
+                     pair should differ.",
+                )
+                .wrap(),
+            );
+        }
+    });
+}
+
+/// Collapsing section, open by default, with spacing below.
+fn section_header(ui: &mut egui::Ui, title: &str, body: impl FnOnce(&mut egui::Ui)) {
+    egui::CollapsingHeader::new(title)
+        .default_open(true)
+        .show(ui, |ui| {
+            ui.add_space(6.0);
+            body(ui);
+        });
+    ui.add_space(12.0);
+}
+
+/// One labeled form row; wraps when the panel is narrower than label + controls.
+fn form_row(ui: &mut egui::Ui, label: &str, widgets: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal_wrapped(|ui| {
+        ui.label(label);
+        ui.add_space(8.0);
+        widgets(ui);
+    });
+    ui.add_space(6.0);
+}
+
+/// Width for text inputs: fill remaining panel space without forcing overflow.
+fn text_field_width(ui: &egui::Ui, label_reserve: f32) -> f32 {
+    (ui.available_width() - label_reserve - 16.0)
+        .clamp(80.0, 480.0)
+}
+
+/// CSI disable flags — explicit columns sized to the panel (Grid overflows here).
+fn render_csi_flags(ui: &mut egui::Ui, csi: &mut CsiForm) {
+    let panel_w = ui.available_width();
+    let two_cols = panel_w >= 360.0;
+
+    if two_cols {
+        let col_w = ((panel_w - 12.0) / 2.0).max(120.0);
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_max_width(col_w);
+                csi_flag_column_a(ui, csi);
+            });
+            ui.add_space(12.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(col_w);
+                csi_flag_column_b(ui, csi);
+            });
+        });
+    } else {
+        ui.vertical(|ui| {
+            ui.set_max_width(panel_w);
+            csi_flag_column_a(ui, csi);
+            csi_flag_column_b(ui, csi);
+        });
+    }
+}
+
+fn csi_flag_column_a(ui: &mut egui::Ui, csi: &mut CsiForm) {
+    ui.checkbox(&mut csi.lltf, "lltf");
+    ui.checkbox(&mut csi.htltf, "htltf");
+    ui.checkbox(&mut csi.stbc_htltf, "stbc_htltf");
+    ui.checkbox(&mut csi.ltf_merge, "ltf_merge");
+    ui.checkbox(&mut csi.csi, "csi");
+    ui.checkbox(&mut csi.csi_legacy, "csi_legacy");
+}
+
+fn csi_flag_column_b(ui: &mut egui::Ui, csi: &mut CsiForm) {
+    ui.checkbox(&mut csi.csi_ht20, "csi_ht20");
+    ui.checkbox(&mut csi.csi_ht40, "csi_ht40");
+    ui.checkbox(&mut csi.dump_ack, "dump_ack");
+    ui.checkbox(&mut csi.csi_force_lltf, "csi_force_lltf (C5)");
+    ui.checkbox(&mut csi.csi_vht, "csi_vht (C5)");
+}
+
+fn wifi_mode_picker(ui: &mut egui::Ui, device_id: &str, supports_v07: bool, mode: &mut WiFiMode) {
+    egui::ComboBox::from_id_salt(format!("wifi_mode_combo_{device_id}"))
         .selected_text(mode.as_api_value())
         .show_ui(ui, |ui| {
             ui.selectable_value(mode, WiFiMode::Station, "station");
             ui.selectable_value(mode, WiFiMode::Sniffer, "sniffer");
+            ui.add_enabled_ui(supports_v07, |ui| {
+                ui.selectable_value(mode, WiFiMode::WifiAp, "wifi-ap (≥ 0.7.0)");
+            });
             ui.selectable_value(mode, WiFiMode::EspNowCentral, "esp-now-central");
             ui.selectable_value(mode, WiFiMode::EspNowPeripheral, "esp-now-peripheral");
+            ui.add_enabled_ui(supports_v07, |ui| {
+                ui.selectable_value(
+                    mode,
+                    WiFiMode::EspNowFastCollector,
+                    "esp-now-fast-collector (≥ 0.7.0)",
+                );
+                ui.selectable_value(
+                    mode,
+                    WiFiMode::EspNowFastSource,
+                    "esp-now-fast-source (≥ 0.7.0)",
+                );
+            });
         });
 }
 
@@ -246,14 +488,13 @@ fn collection_mode_picker(ui: &mut egui::Ui, mode: &mut CollectionMode) {
         });
 }
 
-fn log_mode_picker(ui: &mut egui::Ui, mode: &mut LogMode) {
-    egui::ComboBox::from_id_salt("log_mode_combo")
+fn ht40_picker(ui: &mut egui::Ui, mode: &mut Ht40Mode) {
+    egui::ComboBox::from_id_salt("ht40_combo")
         .selected_text(mode.as_api_value())
         .show_ui(ui, |ui| {
-            ui.selectable_value(mode, LogMode::Text, "text");
-            ui.selectable_value(mode, LogMode::ArrayList, "array-list");
-            ui.selectable_value(mode, LogMode::Serialized, "serialized");
-            ui.selectable_value(mode, LogMode::EspCsiTool, "esp-csi-tool");
+            ui.selectable_value(mode, Ht40Mode::None, "none");
+            ui.selectable_value(mode, Ht40Mode::Above, "above");
+            ui.selectable_value(mode, Ht40Mode::Below, "below");
         });
 }
 
@@ -278,12 +519,22 @@ fn csi_delivery_picker(ui: &mut egui::Ui, mode: &mut CsiDeliveryMode) {
         });
 }
 
-fn ht40_picker(ui: &mut egui::Ui, ht40: &mut String) {
-    egui::ComboBox::from_id_salt("ht40_combo")
-        .selected_text(ht40.as_str())
+fn protocol_picker(
+    ui: &mut egui::Ui,
+    protocol: &mut WifiProtocol,
+    extra_protocols: &[&'static str],
+) {
+    egui::ComboBox::from_id_salt("protocol_combo")
+        .selected_text(protocol.as_api_value())
         .show_ui(ui, |ui| {
-            for option in HT40_OPTIONS {
-                ui.selectable_value(ht40, (*option).to_owned(), *option);
+            ui.selectable_value(protocol, WifiProtocol::B, "b");
+            ui.selectable_value(protocol, WifiProtocol::G, "g");
+            ui.selectable_value(protocol, WifiProtocol::N, "n");
+            ui.selectable_value(protocol, WifiProtocol::Lr, "lr");
+            ui.selectable_value(protocol, WifiProtocol::A, "a");
+            ui.selectable_value(protocol, WifiProtocol::Ac, "ac");
+            for extra in extra_protocols {
+                ui.selectable_value(protocol, WifiProtocol::Ext(extra), *extra);
             }
         });
 }
