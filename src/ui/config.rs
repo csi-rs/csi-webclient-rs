@@ -1,7 +1,7 @@
 use crate::profile::ClientProfile;
 use crate::state::{
-    CollectionMode, CsiDeliveryMode, CsiForm, DeviceAction, DeviceState, Ht40Mode, OutputMode,
-    PHY_RATES, WiFiMode, WifiProtocol,
+    CsiDeliveryMode, CsiForm, DeviceAction, DeviceState, Ht40Mode, OutputMode, PHY_RATES, WiFiMode,
+    WifiProtocol,
 };
 
 /// Render the configuration view for one device.
@@ -98,6 +98,11 @@ fn render_body(
                     );
             });
 
+            // `--ht40` runs the softAP itself as HT40; none = HT20.
+            form_row(ui, "HT40 secondary", |ui| {
+                ht40_picker(ui, &mut forms.wifi.ht40);
+            });
+
             ui.checkbox(&mut forms.wifi.ap_burst, "Sync burst flood")
                 .on_hover_text(
                     "Every flood tick sends one frame back-to-back to every \
@@ -124,29 +129,28 @@ fn render_body(
             ui.add_space(6.0);
         }
 
-        if forms.wifi.mode.is_esp_now() {
+        if forms.wifi.mode.is_emitter() {
             form_row(ui, "Peer MAC", |ui| {
                 ui.add(
                     egui::TextEdit::singleline(&mut forms.wifi.peer_mac)
-                        .hint_text("auto")
+                        .hint_text("broadcast")
                         .desired_width(field_width),
                 );
-            });
-
-            form_row(ui, "HT40 secondary", |ui| {
-                ht40_picker(ui, &mut forms.wifi.ht40);
             });
 
             ui.add_space(4.0);
             ui.add(
                 egui::Label::new(
-                    "Peer MAC / HT40 apply to all ESP-NOW modes; empty MAC = auto.",
+                    "Destination address of the injected frames; empty = broadcast. \
+                     Unicasting to a collector's MAC usually raises that collector's \
+                     CSI rate. This node transmits only and captures no CSI — pair it \
+                     with a sniffer on the same channel.",
                 )
                 .wrap(),
             );
         }
 
-        // Mode-specific fields supplied by the profile (e.g. injector params);
+        // Mode-specific fields supplied by the profile (e.g. emitter params);
         // relabels/reuses fields the core does not name for this mode. Rendered
         // before the Apply button so they are included in the submitted form.
         let mode_api = forms.wifi.mode.as_api_value();
@@ -203,8 +207,8 @@ fn render_body(
             .wrap(),
         );
 
-        // The flood-kind toggle only exists for the WiFi infra modes: ESP-NOW
-        // modes transmit their own frames and sniffers generate no traffic.
+        // The flood-kind toggle only exists for the WiFi infra modes: emitters
+        // inject their own frames and sniffers generate no traffic.
         if matches!(forms.wifi.mode, WiFiMode::WifiAp | WiFiMode::Station) {
             let traffic_on = forms
                 .traffic
@@ -236,14 +240,12 @@ fn render_body(
                 )
                 .wrap(),
             );
-            if traffic_on
-                && forms.traffic.unsolicited
-                && matches!(forms.collection_mode, CollectionMode::Collector)
-            {
+            if traffic_on && forms.traffic.unsolicited && forms.csi_output.enabled {
                 ui.colored_label(
                     egui::Color32::YELLOW,
-                    "Unsolicited flood + Collector: this node will capture ~no CSI. \
-                     Set Collector on the peer, or disable the unsolicited flood.",
+                    "Unsolicited flood + CSI output on: this node will capture ~no CSI, \
+                     so it delivers ~nothing. Collect on the peer instead, or disable \
+                     the unsolicited flood.",
                 );
             }
         }
@@ -276,8 +278,8 @@ fn render_body(
         });
         ui.add(
             egui::Label::new(
-                "Honored by all ESP-NOW modes (incl. fast simplex) and wifi-ap/sniffer; \
-                 ignored by station.",
+                "Honored by wifi-ap and sniffer; ignored by station, and by the emitter \
+                 modes (which force their own TX PHY).",
             )
             .wrap(),
         );
@@ -306,17 +308,28 @@ fn render_body(
 
     } // end !hide_capture
 
-    // Collection Mode is capture config; Output Mode is a CSI consumer. Show the
+    // CSI output is capture config; Output Mode is a CSI consumer. Show the
     // section if either row is relevant for this mode.
     if !hide_capture || !no_csi {
-        section_header(ui, "Collection & Output", |ui| {
+        section_header(ui, "CSI Output", |ui| {
             if !hide_capture {
-                form_row(ui, "Collection Mode", |ui| {
-                    collection_mode_picker(ui, &mut forms.collection_mode);
-                    if ui.button("Apply").clicked() {
-                        actions.push(DeviceAction::SetCollectionMode(forms.collection_mode));
-                    }
-                });
+                ui.checkbox(
+                    &mut forms.csi_output.enabled,
+                    "Deliver captured CSI off-device",
+                );
+                ui.add(
+                    egui::Label::new(
+                        "Off keeps the radio capturing (RX path and timing unchanged) but \
+                         decodes, logs and streams nothing — for a node whose only job is \
+                         to keep traffic on air.",
+                    )
+                    .wrap(),
+                );
+                ui.add_space(6.0);
+                if ui.button("Apply CSI Output").clicked() {
+                    actions.push(DeviceAction::SetCsiOutput(forms.csi_output));
+                }
+                ui.add_space(10.0);
             }
 
             if !no_csi {
@@ -407,7 +420,7 @@ fn render_persistence(
             ui.add(
                 egui::Label::new(
                     "Copies the source device's form values onto this device and applies \
-                     them, including the ESP-NOW peer MAC — clear it afterwards if the \
+                     them, including the emitter peer MAC — clear it afterwards if the \
                      pair should differ.",
                 )
                 .wrap(),
@@ -497,38 +510,18 @@ fn wifi_mode_picker(
     egui::ComboBox::from_id_salt(format!("wifi_mode_combo_{device_id}"))
         .selected_text(mode.as_api_value())
         .show_ui(ui, |ui| {
+            // Collector capture paths first, then the TX-only emitters.
             ui.selectable_value(mode, WiFiMode::Station, "station");
             ui.selectable_value(mode, WiFiMode::Sniffer, "sniffer");
             ui.add_enabled_ui(supports_v07, |ui| {
                 ui.selectable_value(mode, WiFiMode::WifiAp, "wifi-ap (≥ 0.7.0)");
             });
-            ui.selectable_value(mode, WiFiMode::EspNowCentral, "esp-now-central");
-            ui.selectable_value(mode, WiFiMode::EspNowPeripheral, "esp-now-peripheral");
-            ui.add_enabled_ui(supports_v07, |ui| {
-                ui.selectable_value(
-                    mode,
-                    WiFiMode::EspNowFastCollector,
-                    "esp-now-fast-collector (≥ 0.7.0)",
-                );
-                ui.selectable_value(
-                    mode,
-                    WiFiMode::EspNowFastSource,
-                    "esp-now-fast-source (≥ 0.7.0)",
-                );
-            });
+            ui.selectable_value(mode, WiFiMode::Ht20Emitter, "ht20-emitter");
+            ui.selectable_value(mode, WiFiMode::Ht40Emitter, "ht40-emitter");
             // Profile-supplied modes (none in the standard build).
             for extra in extra_modes {
                 ui.selectable_value(mode, WiFiMode::Ext(extra), *extra);
             }
-        });
-}
-
-fn collection_mode_picker(ui: &mut egui::Ui, mode: &mut CollectionMode) {
-    egui::ComboBox::from_id_salt("collection_mode_combo")
-        .selected_text(mode.as_api_value())
-        .show_ui(ui, |ui| {
-            ui.selectable_value(mode, CollectionMode::Collector, "collector");
-            ui.selectable_value(mode, CollectionMode::Listener, "listener");
         });
 }
 

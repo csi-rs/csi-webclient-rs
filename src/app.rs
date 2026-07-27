@@ -210,12 +210,12 @@ impl CsiClientApp {
                     Some(json!({ "preset": preset })),
                 );
             }
-            DeviceAction::SetCollectionMode(mode) => {
+            DeviceAction::SetCsiOutput(form) => {
                 self.submit_device_post(
                     &id,
-                    "set_collection_mode",
-                    "config/collection-mode",
-                    Some(json!({ "mode": mode.as_api_value() })),
+                    "set_csi_output",
+                    "config/csi-output",
+                    Some(json!({ "enabled": form.enabled })),
                 );
             }
             DeviceAction::SetOutputMode(mode) => {
@@ -604,7 +604,10 @@ impl CsiClientApp {
             body["channel"] = json!(ch);
         }
 
-        if wifi.mode.is_esp_now() {
+        // `peer_mac` is the injection destination (emitter modes); `ht40` runs
+        // the softAP as HT40 (`wifi-ap` only). Two unrelated knobs — send each
+        // only where the firmware reads it.
+        if wifi.mode.is_emitter() {
             let peer_mac = wifi.peer_mac.trim();
             if !peer_mac.is_empty() {
                 if let Err(message) = validate_peer_mac(peer_mac) {
@@ -613,10 +616,12 @@ impl CsiClientApp {
                 }
             }
             body["peer_mac"] = json!(peer_mac);
+        }
+        if matches!(wifi.mode, WiFiMode::WifiAp) {
             body["ht40"] = json!(wifi.ht40.as_api_value());
         }
 
-        // Profile-supplied, mode-specific params (e.g. injector fields, or a
+        // Profile-supplied, mode-specific params (e.g. emitter fields, or a
         // relabelled destination MAC). Merged verbatim; the server routes known
         // keys to their named fields and passes the rest through generically.
         for (key, value) in &wifi.wifi_extra {
@@ -691,14 +696,19 @@ impl CsiClientApp {
                     unsolicited: false,
                 }),
             ),
-            PairingPreset::EspNowFastSimplex => (
+            // Emitter + sniffer: device 1 injects HT PPDUs on the channel
+            // (TX only, no association, captures nothing), device 2 locks the
+            // same channel promiscuously and measures every frame overheard.
+            // The emitter forces its own TX PHY and generates its own frames,
+            // so neither board takes a protocol or traffic step.
+            PairingPreset::Ht20EmitterSniffer => (
                 WiFiForm {
-                    mode: WiFiMode::EspNowFastCollector,
+                    mode: WiFiMode::Ht20Emitter,
                     channel: ch.clone(),
                     ..WiFiForm::default()
                 },
                 WiFiForm {
-                    mode: WiFiMode::EspNowFastSource,
+                    mode: WiFiMode::Sniffer,
                     channel: ch,
                     ..WiFiForm::default()
                 },
@@ -707,14 +717,14 @@ impl CsiClientApp {
                 None,
                 None,
             ),
-            PairingPreset::EspNowBalanced => (
+            PairingPreset::Ht40EmitterSniffer => (
                 WiFiForm {
-                    mode: WiFiMode::EspNowCentral,
+                    mode: WiFiMode::Ht40Emitter,
                     channel: ch.clone(),
                     ..WiFiForm::default()
                 },
                 WiFiForm {
-                    mode: WiFiMode::EspNowPeripheral,
+                    mode: WiFiMode::Sniffer,
                     channel: ch,
                     ..WiFiForm::default()
                 },
@@ -945,7 +955,7 @@ impl CsiClientApp {
                     // Any successful config-mutating POST repopulates a slot in the
                     // server cache, so re-pull `config` to keep the form in sync.
                     "reset_config" | "set_wifi" | "set_traffic" | "set_csi" | "set_csi_preset"
-                    | "set_collection_mode" | "set_output_mode" | "set_protocol"
+                    | "set_csi_output" | "set_output_mode" | "set_protocol"
                     | "set_rate" | "set_io_tasks" | "set_csi_delivery" => {
                         followups.push(UserIntent::Device {
                             id: id.clone(),
@@ -1285,7 +1295,7 @@ fn full_config_steps(id: &str, forms: &DeviceForms) -> Vec<(String, DeviceAction
         DeviceAction::SetPhyRate(forms.phy_rate.clone()),
         DeviceAction::SetIoTasks(forms.io_tasks.clone()),
         DeviceAction::SetCsiDelivery(forms.csi_delivery.clone()),
-        DeviceAction::SetCollectionMode(forms.collection_mode),
+        DeviceAction::SetCsiOutput(forms.csi_output),
         DeviceAction::SetOutputMode(forms.output_mode),
     ]
     .into_iter()
@@ -1320,7 +1330,7 @@ fn validate_full_config(device: &DeviceState) -> Result<(), String> {
     if !wifi.channel.trim().is_empty() && parse_optional_u16(&wifi.channel).is_none() {
         return Err("Wi-Fi channel must be a valid number".to_owned());
     }
-    if wifi.mode.is_esp_now() && !wifi.peer_mac.trim().is_empty() {
+    if wifi.mode.is_emitter() && !wifi.peer_mac.trim().is_empty() {
         validate_peer_mac(wifi.peer_mac.trim())?;
     }
     if parse_required_u64(&forms.traffic.frequency_hz).is_none() {
@@ -1347,13 +1357,13 @@ fn step_action_label(action: &DeviceAction) -> &str {
         DeviceAction::SetPhyRate(_) => "set_rate",
         DeviceAction::SetIoTasks(_) => "set_io_tasks",
         DeviceAction::SetCsiDelivery(_) => "set_csi_delivery",
-        DeviceAction::SetCollectionMode(_) => "set_collection_mode",
+        DeviceAction::SetCsiOutput(_) => "set_csi_output",
         DeviceAction::SetOutputMode(_) => "set_output_mode",
         _ => "",
     }
 }
 
-/// Validate an ESP-NOW peer MAC (`aa:bb:cc:dd:ee:ff` or `aa-bb-...`).
+/// Validate an emitter destination MAC (`aa:bb:cc:dd:ee:ff` or `aa-bb-...`).
 fn validate_peer_mac(mac: &str) -> Result<(), String> {
     let sep = if mac.contains(':') {
         ':'
@@ -1482,7 +1492,7 @@ mod tests {
                 "set_rate",
                 "set_io_tasks",
                 "set_csi_delivery",
-                "set_collection_mode",
+                "set_csi_output",
                 "set_output_mode",
             ]
         );
@@ -1566,10 +1576,13 @@ mod tests {
         device.forms.wifi.channel = "not-a-channel".to_owned();
         assert!(validate_full_config(&device).is_err());
 
+        // A malformed injection destination is only validated where it is sent.
         let mut device = DeviceState::new("dev-a");
-        device.forms.wifi.mode = WiFiMode::EspNowCentral;
+        device.forms.wifi.mode = WiFiMode::Ht20Emitter;
         device.forms.wifi.peer_mac = "zz:zz".to_owned();
         assert!(validate_full_config(&device).is_err());
+        device.forms.wifi.mode = WiFiMode::Sniffer;
+        assert!(validate_full_config(&device).is_ok());
 
         // v0.7-gated mode with no firmware info at all.
         let mut device = DeviceState::new("dev-a");

@@ -37,7 +37,7 @@ The client targets `csi-webserver` **v0.1.5+** (multi-device API + esp-csi-cli v
 - `POST /api/devices/{id}/config/wifi`
 - `POST /api/devices/{id}/config/traffic`
 - `POST /api/devices/{id}/config/csi`
-- `POST /api/devices/{id}/config/collection-mode`
+- `POST /api/devices/{id}/config/csi-output`
 - `POST /api/devices/{id}/config/output-mode`
 - `POST /api/devices/{id}/config/protocol`
 - `POST /api/devices/{id}/config/rate`
@@ -55,13 +55,16 @@ For detailed request/response behavior and payload fields, see:
 
 ## Protocol Values Used By The Client
 
-- Wi-Fi modes: `station`, `sniffer`, `wifi-ap`, `esp-now-central`, `esp-now-peripheral`,
-  `esp-now-fast-collector`, `esp-now-fast-source` (latter three require firmware ≥ 0.7.0)
-- Collection modes: `collector`, `listener`
+- Wi-Fi modes: `station`, `sniffer`, `wifi-ap` (requires firmware ≥ 0.7.0) — the
+  collector capture paths — plus the TX-only `ht20-emitter`, `ht40-emitter`
+  (all chips). A `ClientProfile` may add more; any mode string the client does
+  not name round-trips verbatim as `WiFiMode::Ext`.
+- CSI output (`config/csi-output`): `enabled` boolean, device default `true` —
+  whether captured CSI is delivered off-device. Capture runs either way.
 - Output modes: `stream`, `dump`, `both`
 - CSI delivery modes: `off`, `callback`, `async`, `raw`
 - Wi-Fi PHY protocols: `b`, `g`, `n`, `lr`, `a`, `ac` (a `ClientProfile` may add more)
-- Two-device pairing presets: SoftAP lab, ESP-NOW fast simplex, ESP-NOW balanced
+- Two-device pairing presets: SoftAP lab, HT20 emitter + sniffer, HT40 emitter + sniffer
 - PHY rates: `1m`, `1m-l`, `2m`, `5m5`, `5m5-l`, `11m`, `11m-l`, `6m`, `9m`, `12m`,
   `18m`, `24m`, `36m`, `48m`, `54m`, `mcs0-lgi`..`mcs7-lgi`, `mcs0-sgi`
 
@@ -75,7 +78,7 @@ Free-form strings sent to `POST /api/devices/{id}/config/wifi` (`sta_ssid`,
 the firmware tokenizer rules: max 32 bytes, no newlines, and not both `'`
 and `"` in the same value. Mode-specific fields are omitted from the JSON
 body when they do not apply (STA fields in station mode only, AP fields in
-`wifi-ap` only, peer MAC / HT40 in ESP-NOW modes only).
+`wifi-ap` only, peer MAC in the emitter modes only, HT40 in `wifi-ap` only).
 
 ## Notes
 

@@ -51,8 +51,12 @@ pub fn render(ui: &mut egui::Ui, device: &DeviceState) {
     ui.add_space(4.0);
     stat_row(
         ui,
-        "Collection role",
-        device.forms.collection_mode.as_api_value().to_owned(),
+        "CSI output",
+        if device.forms.csi_output.enabled {
+            "enabled".to_owned()
+        } else {
+            "disabled (capturing, not delivering)".to_owned()
+        },
     );
     stat_row(
         ui,

@@ -12,8 +12,9 @@ This project provides a native Rust GUI (egui/eframe) that talks to a running `c
 - Connect per-device WebSockets and view incoming **serialized** CSI frame previews (COBS+postcard hex).
 - Record local **Parquet** exports (`csi_export_{id}_YYYYMMDD_HHmmss.parquet`) with a schema matching server-side dumps.
 - Switch runtime output behavior (`stream`, `dump`, `both`) per device from the UI.
-- Configure **esp-csi-cli-rs v0.7.0** Wi-Fi modes (`wifi-ap`, ESP-NOW fast simplex) and softAP options.
-- Apply two-device **pairing presets** (SoftAP lab, ESP-NOW fast/balanced) from the Devices tab.
+- Configure emitter/collector Wi-Fi modes (`station`, `sniffer`, `wifi-ap`, `ht20-emitter`, `ht40-emitter`) and softAP options.
+- Toggle off-device **CSI output** per device (capture keeps running when delivery is off).
+- Apply two-device **pairing presets** (SoftAP lab, HT20/HT40 emitter + sniffer) from the Devices tab.
 - **Save/load device configuration** as JSON snapshots (`csi_config_{id}_YYYYMMDD_HHmmss.json`; note: includes Wi-Fi passwords in plain text) and **copy configuration from one device to another** from the Config tab.
 
 ## Architecture
@@ -40,7 +41,7 @@ The client targets **`csi-webserver` ≥ 0.1.5** (multi-device API + esp-csi-cli
 - `GET /api/devices/{id}/info`
 - `GET /api/devices/{id}/config`
 - `GET /api/devices/{id}/control/status`
-- `POST /api/devices/{id}/config/*` — wifi, traffic, csi, collection-mode, output-mode, rate, io-tasks, csi-delivery, protocol, reset
+- `POST /api/devices/{id}/config/*` — wifi, traffic, csi, csi-output, output-mode, rate, io-tasks, csi-delivery, protocol, reset
 - `POST /api/devices/{id}/control/*` — start, stop, reset, stats
 - `GET /api/devices/{id}/ws` — per-device WebSocket (raw serialized CSI frames)
 

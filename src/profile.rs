@@ -31,7 +31,7 @@ pub trait ClientProfile {
 
     /// Whether the given Wi-Fi mode (its API string) ignores the normal
     /// device-side *capture* configuration — CSI flags, CSI delivery, IO tasks,
-    /// collection mode, PHY protocol, PHY rate, traffic, and CSI presets. When
+    /// CSI output, PHY protocol, PHY rate, traffic, and CSI presets. When
     /// `true`, the Config view hides those sections because they are no-ops or
     /// conflict for that mode.
     fn hides_capture_config(&self, mode_api: &str) -> bool {

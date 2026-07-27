@@ -236,8 +236,8 @@ fn render_pairing_presets(
         ui.horizontal_wrapped(|ui| {
             for preset in [
                 PairingPreset::SoftApLab,
-                PairingPreset::EspNowFastSimplex,
-                PairingPreset::EspNowBalanced,
+                PairingPreset::Ht20EmitterSniffer,
+                PairingPreset::Ht40EmitterSniffer,
             ] {
                 if ui.button(preset.label()).clicked() {
                     intents.push(UserIntent::Device {
@@ -256,7 +256,9 @@ fn render_pairing_presets(
                 "Applies reset + Wi-Fi (+ protocol/traffic where needed) to both boards in \
                  order. SoftAP lab pair: device 1 becomes the AP flooding one-directional \
                  (unsolicited echo-reply) traffic at 1000 Hz; device 2 becomes a \
-                 receive-only station — collect CSI on device 2.",
+                 receive-only station — collect CSI on device 2. Emitter + sniffer: \
+                 device 1 injects HT PPDUs on the channel and captures nothing; device 2 \
+                 sniffs the same channel — collect CSI on device 2.",
             )
             .wrap(),
         );

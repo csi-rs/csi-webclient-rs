@@ -111,7 +111,7 @@ since startup or the last `reset-config`. Sub-section objects (`wifi`,
     "sta_ssid": "MyNetwork"
   },
   "collection": {
-    "mode": "collector",
+    "csi_output_enabled": true,
     "traffic_hz": 100,
     "phy_rate": "mcs0-lgi",
     "protocol": "n",
@@ -162,7 +162,7 @@ Notes the client relies on:
 
 ```json
 {
-  "mode": "station | sniffer | wifi-ap | esp-now-central | esp-now-peripheral | esp-now-fast-collector | esp-now-fast-source",
+  "mode": "station | sniffer | wifi-ap | ht20-emitter | ht40-emitter",
   "sta_ssid": "string or null",
   "sta_password": "string or null",
   "ap_ssid": "string",
@@ -193,9 +193,24 @@ Client-side validation (mirrors firmware tokenizer rules):
   `station` mode it is a pre-association band-selection hint (meaningful on the
   C5's 5 GHz band); leave it blank to inherit the channel from the associated AP.
   For all other modes it is the operating channel.
-- `peer_mac` / `ht40` are sent only in ESP-NOW modes (including fast simplex).
-- Modes `wifi-ap`, `esp-now-fast-collector`, and `esp-now-fast-source` require
-  `esp-csi-cli-rs` ≥ 0.7.0; the client gates them in the mode picker.
+- A node either **emits** (puts known RF energy on the channel, captures nothing)
+  or **collects** (captures the channel response). `station`, `sniffer` and
+  `wifi-ap` are the collector capture paths; `ht20-emitter` / `ht40-emitter` are
+  TX-only and raw-inject HT PPDUs without associating. Emitters build on every
+  chip. A [`ClientProfile`] may add further modes (see "Unknown modes" below).
+- `peer_mac` is sent only in the emitter modes: it is the destination address of
+  the injected frames, empty meaning broadcast. Unicasting to a collector's MAC
+  usually raises that collector's CSI rate.
+- `ht40` is sent only in `wifi-ap` mode: it runs the softAP itself as HT40 with
+  the given secondary channel (`none` = HT20).
+- Mode `wifi-ap` requires `esp-csi-cli-rs` ≥ 0.7.0; the client gates it in the
+  mode picker.
+
+Unknown modes: a mode string the client does not name round-trips verbatim
+(`WiFiMode::Ext`) instead of failing, so the client degrades gracefully against
+firmware whose mode vocabulary it predates.
+
+[`ClientProfile`]: ../src/profile.rs
 
 ### `POST /api/devices/{id}/config/traffic`
 
@@ -238,11 +253,19 @@ builds may add more). `val_scale_cfg` parses as `u32` when present. The flag
 groupings are documented in the server spec; the firmware silently ignores
 flags outside its compiled-in chip variant.
 
-### `POST /api/devices/{id}/config/collection-mode`
+### `POST /api/devices/{id}/config/csi-output`
 
 ```json
-{ "mode": "collector | listener" }
+{ "enabled": true }
 ```
+
+Forwards `set-csi-output --enabled=<true|false>` (device default `true`):
+whether captured CSI is delivered off-device. This is *not* a role — capture
+keeps running either way, so the RX path and its timing are unchanged; with
+delivery off nothing is decoded, logged, or streamed. Use it for a node whose
+only job is to keep traffic on air. An emitter captures nothing, so the flag has
+no effect there. Round-trips via the `collection` section
+(`csi_output_enabled`) of `GET …/config`.
 
 ### `POST /api/devices/{id}/config/output-mode`
 
@@ -272,7 +295,8 @@ Applied at the start of each collection run. Default on the device is `lr`.
 
 Accepted rates: `1m`, `1m-l`, `2m`, `5m5`, `5m5-l`, `11m`, `11m-l`, `6m`,
 `9m`, `12m`, `18m`, `24m`, `36m`, `48m`, `54m`, `mcs0-lgi`..`mcs7-lgi`,
-`mcs0-sgi`. Honored by all modes except `station` (including fast ESP-NOW).
+`mcs0-sgi`. Honored by `wifi-ap` and `sniffer`; ignored by `station`, and by the
+emitter modes (which force their own TX PHY).
 
 ### `POST /api/devices/{id}/config/io-tasks`
 
