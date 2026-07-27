@@ -58,8 +58,8 @@ pub fn render(
                                     config::render(ui, device, &all_ids, &mut acts, profile)
                                 }
                                 Tab::Dashboard => dashboard::render(ui, device),
-                                Tab::Control => control::render(ui, device, &mut acts),
-                                Tab::Stream => stream::render(ui, device, &mut acts),
+                                Tab::Control => control::render(ui, device, &mut acts, profile),
+                                Tab::Stream => stream::render(ui, device, &mut acts, profile),
                                 Tab::Devices => {}
                             }
                             for action in acts {

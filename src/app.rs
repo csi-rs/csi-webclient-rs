@@ -616,6 +616,13 @@ impl CsiClientApp {
             body["ht40"] = json!(wifi.ht40.as_api_value());
         }
 
+        // Profile-supplied, mode-specific params (e.g. injector fields, or a
+        // relabelled destination MAC). Merged verbatim; the server routes known
+        // keys to their named fields and passes the rest through generically.
+        for (key, value) in &wifi.wifi_extra {
+            body[key] = value.clone();
+        }
+
         // Keep the stored form in sync with what was submitted — a no-op for
         // UI-driven edits (the form was the source), but required for the
         // pairing-preset queue, whose later SetTraffic step consults

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 /// UI navigation tabs for the main window.
@@ -13,10 +15,14 @@ pub enum Tab {
 
 /// Wi-Fi operating modes accepted by `POST /api/devices/{id}/config/wifi`.
 ///
-/// Serde names match [`Self::as_api_value`] so config snapshot files use the
-/// same strings as the HTTP API.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
+/// The wire strings ([`Self::as_api_value`]) are also the config-snapshot
+/// strings, via the custom `Serialize`/`Deserialize` below.
+///
+/// [`Self::Ext`] is a generic escape hatch: a [`crate::profile::ClientProfile`]
+/// can advertise additional operating modes the core library does not name
+/// (e.g. a specialised node mode injected by a companion crate). Those
+/// round-trip verbatim without the core naming any of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WiFiMode {
     Station,
     Sniffer,
@@ -25,6 +31,10 @@ pub enum WiFiMode {
     EspNowPeripheral,
     EspNowFastCollector,
     EspNowFastSource,
+    /// A profile-supplied mode string carried through the client without the
+    /// core library naming it. Any mode-specific parameters travel in
+    /// [`WiFiForm::wifi_extra`].
+    Ext(&'static str),
 }
 
 impl WiFiMode {
@@ -38,21 +48,27 @@ impl WiFiMode {
             Self::EspNowPeripheral => "esp-now-peripheral",
             Self::EspNowFastCollector => "esp-now-fast-collector",
             Self::EspNowFastSource => "esp-now-fast-source",
+            Self::Ext(s) => s,
         }
     }
 
     /// Resolve a backend value back to a variant.
+    ///
+    /// Unknown values become [`Self::Ext`] so a profile-supplied mode round-trips
+    /// even though the core library does not name it. The string is interned
+    /// (leaked once) to obtain the `'static` lifetime; the set of distinct mode
+    /// strings a device reports is tiny and bounded.
     pub fn from_api_value(value: &str) -> Option<Self> {
-        match value {
-            "station" => Some(Self::Station),
-            "sniffer" => Some(Self::Sniffer),
-            "wifi-ap" => Some(Self::WifiAp),
-            "esp-now-central" => Some(Self::EspNowCentral),
-            "esp-now-peripheral" => Some(Self::EspNowPeripheral),
-            "esp-now-fast-collector" => Some(Self::EspNowFastCollector),
-            "esp-now-fast-source" => Some(Self::EspNowFastSource),
-            _ => None,
-        }
+        Some(match value {
+            "station" => Self::Station,
+            "sniffer" => Self::Sniffer,
+            "wifi-ap" => Self::WifiAp,
+            "esp-now-central" => Self::EspNowCentral,
+            "esp-now-peripheral" => Self::EspNowPeripheral,
+            "esp-now-fast-collector" => Self::EspNowFastCollector,
+            "esp-now-fast-source" => Self::EspNowFastSource,
+            other => Self::Ext(intern(other)),
+        })
     }
 
     /// True for all ESP-NOW operating modes (balanced and fast simplex).
@@ -89,6 +105,19 @@ impl WiFiMode {
 impl Default for WiFiMode {
     fn default() -> Self {
         Self::Station
+    }
+}
+
+impl Serialize for WiFiMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_api_value())
+    }
+}
+
+impl<'de> Deserialize<'de> for WiFiMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Ok(Self::from_api_value(&value).unwrap_or_default())
     }
 }
 
@@ -320,6 +349,12 @@ pub struct WiFiForm {
     pub peer_mac: String,
     /// Forced ESP-NOW TX HT40 secondary channel. ESP-NOW modes only.
     pub ht40: Ht40Mode,
+    /// Mode-specific parameters supplied by a [`crate::profile::ClientProfile`]
+    /// (via [`ClientProfile::extra_wifi_fields`](crate::profile::ClientProfile::extra_wifi_fields)).
+    /// Merged verbatim into the `set-wifi` request body, so the core library
+    /// names none of them. Empty for the built-in modes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub wifi_extra: BTreeMap<String, serde_json::Value>,
 }
 
 impl Default for WiFiForm {
@@ -336,6 +371,7 @@ impl Default for WiFiForm {
             channel: String::new(),
             peer_mac: String::new(),
             ht40: Ht40Mode::None,
+            wifi_extra: BTreeMap::new(),
         }
     }
 }
@@ -1404,6 +1440,23 @@ mod tests {
         assert!(!WiFiMode::Sniffer.channel_is_hint());
         assert!(!WiFiMode::WifiAp.channel_is_hint());
         assert!(!WiFiMode::EspNowCentral.channel_is_hint());
+    }
+
+    #[test]
+    fn wifi_mode_ext_round_trips_unknown_values() {
+        // A profile-supplied mode the core does not name becomes `Ext` and
+        // round-trips verbatim through the API-value and JSON snapshot codecs.
+        let parsed = WiFiMode::from_api_value("he20-injector").unwrap();
+        assert_eq!(parsed, WiFiMode::Ext("he20-injector"));
+        assert_eq!(parsed.as_api_value(), "he20-injector");
+        assert!(!parsed.is_esp_now());
+        assert!(!parsed.requires_v07());
+        assert!(!parsed.channel_is_hint());
+
+        let json = serde_json::to_string(&parsed).unwrap();
+        assert_eq!(json, "\"he20-injector\"");
+        let back: WiFiMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, WiFiMode::Ext("he20-injector"));
     }
 
     #[test]

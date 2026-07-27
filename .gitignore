@@ -1,2 +1,3 @@
 /target
-.github/copilot-instructions.md*.parquet
+.github/copilot-instructions.md
+*.parquet

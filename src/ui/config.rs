@@ -40,7 +40,13 @@ fn render_body(
 
     section_header(ui, "Wi-Fi", |ui| {
         form_row(ui, "Mode", |ui| {
-            wifi_mode_picker(ui, &device_id, supports_v07, &mut forms.wifi.mode);
+            wifi_mode_picker(
+                ui,
+                &device_id,
+                supports_v07,
+                profile.extra_wifi_modes(),
+                &mut forms.wifi.mode,
+            );
         });
 
         if forms.wifi.mode.requires_v07() && !supports_v07 {
@@ -140,27 +146,45 @@ fn render_body(
             );
         }
 
+        // Mode-specific fields supplied by the profile (e.g. injector params);
+        // relabels/reuses fields the core does not name for this mode. Rendered
+        // before the Apply button so they are included in the submitted form.
+        let mode_api = forms.wifi.mode.as_api_value();
+        profile.extra_wifi_fields(ui, &mut forms.wifi.wifi_extra, mode_api);
+
         ui.add_space(8.0);
         if ui.button("Apply Wi-Fi Config").clicked() {
             actions.push(DeviceAction::SetWifi(forms.wifi.clone()));
         }
 
-        ui.add_space(12.0);
-        let extra_protocols = profile.extra_protocols();
-        form_row(ui, "PHY Protocol", |ui| {
-            protocol_picker(ui, &mut forms.protocol, extra_protocols);
-            if ui.button("Apply Protocol").clicked() {
-                actions.push(DeviceAction::SetProtocol(forms.protocol));
-            }
-        });
-        ui.add(
-            egui::Label::new(
-                "Applied at the start of each run. Default lr (Long-Range) is proprietary; \
-                 use n to associate with a standard AP in station mode.",
-            )
-            .wrap(),
-        );
+        // PHY Protocol is a capture-config knob applied at run start; modes that
+        // force their own PHY (and ignore this) hide it.
+        if !profile.hides_capture_config(mode_api) {
+            ui.add_space(12.0);
+            let extra_protocols = profile.extra_protocols();
+            form_row(ui, "PHY Protocol", |ui| {
+                protocol_picker(ui, &mut forms.protocol, extra_protocols);
+                if ui.button("Apply Protocol").clicked() {
+                    actions.push(DeviceAction::SetProtocol(forms.protocol));
+                }
+            });
+            ui.add(
+                egui::Label::new(
+                    "Applied at the start of each run. Default lr (Long-Range) is proprietary; \
+                     use n to associate with a standard AP in station mode.",
+                )
+                .wrap(),
+            );
+        }
     });
+
+    // Capture-oriented sections below are no-ops (or conflict) for modes the
+    // profile flags — hide them. `no_csi` additionally hides CSI *consumers*.
+    let mode_api = forms.wifi.mode.as_api_value();
+    let hide_capture = profile.hides_capture_config(mode_api);
+    let no_csi = profile.produces_no_csi(mode_api);
+
+    if !hide_capture {
 
     section_header(ui, "Traffic", |ui| {
         form_row(ui, "Frequency (Hz)", |ui| {
@@ -280,21 +304,31 @@ fn render_body(
         }
     });
 
-    section_header(ui, "Collection & Output", |ui| {
-        form_row(ui, "Collection Mode", |ui| {
-            collection_mode_picker(ui, &mut forms.collection_mode);
-            if ui.button("Apply").clicked() {
-                actions.push(DeviceAction::SetCollectionMode(forms.collection_mode));
-            }
-        });
+    } // end !hide_capture
 
-        form_row(ui, "Output Mode", |ui| {
-            output_mode_picker(ui, &mut forms.output_mode);
-            if ui.button("Apply").clicked() {
-                actions.push(DeviceAction::SetOutputMode(forms.output_mode));
+    // Collection Mode is capture config; Output Mode is a CSI consumer. Show the
+    // section if either row is relevant for this mode.
+    if !hide_capture || !no_csi {
+        section_header(ui, "Collection & Output", |ui| {
+            if !hide_capture {
+                form_row(ui, "Collection Mode", |ui| {
+                    collection_mode_picker(ui, &mut forms.collection_mode);
+                    if ui.button("Apply").clicked() {
+                        actions.push(DeviceAction::SetCollectionMode(forms.collection_mode));
+                    }
+                });
+            }
+
+            if !no_csi {
+                form_row(ui, "Output Mode", |ui| {
+                    output_mode_picker(ui, &mut forms.output_mode);
+                    if ui.button("Apply").clicked() {
+                        actions.push(DeviceAction::SetOutputMode(forms.output_mode));
+                    }
+                });
             }
         });
-    });
+    }
 
     ui.add_space(12.0);
     ui.horizontal_wrapped(|ui| {
@@ -453,7 +487,13 @@ fn csi_flag_column_b(ui: &mut egui::Ui, csi: &mut CsiForm) {
     ui.checkbox(&mut csi.csi_vht, "csi_vht (C5)");
 }
 
-fn wifi_mode_picker(ui: &mut egui::Ui, device_id: &str, supports_v07: bool, mode: &mut WiFiMode) {
+fn wifi_mode_picker(
+    ui: &mut egui::Ui,
+    device_id: &str,
+    supports_v07: bool,
+    extra_modes: &[&'static str],
+    mode: &mut WiFiMode,
+) {
     egui::ComboBox::from_id_salt(format!("wifi_mode_combo_{device_id}"))
         .selected_text(mode.as_api_value())
         .show_ui(ui, |ui| {
@@ -476,6 +516,10 @@ fn wifi_mode_picker(ui: &mut egui::Ui, device_id: &str, supports_v07: bool, mode
                     "esp-now-fast-source (≥ 0.7.0)",
                 );
             });
+            // Profile-supplied modes (none in the standard build).
+            for extra in extra_modes {
+                ui.selectable_value(mode, WiFiMode::Ext(extra), *extra);
+            }
         });
 }
 

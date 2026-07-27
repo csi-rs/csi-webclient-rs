@@ -1067,7 +1067,7 @@ dependencies = [
 
 [[package]]
 name = "csi-webclient"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "arrow",
  "chrono",
