@@ -15,10 +15,10 @@ pub enum Tab {
 
 /// Wi-Fi operating modes accepted by `POST /api/devices/{id}/config/wifi`.
 ///
-/// A node either **emits** (puts known RF energy on the channel and captures
-/// nothing) or **collects** (captures the channel response). `station`,
-/// `sniffer` and `wifi-ap` are the collector capture paths; the `*-emitter`
-/// modes are TX-only and raw-inject sounding frames without associating.
+/// Each value names one **operational mode** — how a node reaches the channel. The other
+/// attributes that describe a node (network role, collection mode, session role) are carried by
+/// the mode rather than chosen here. The model is documented once, in
+/// `esp-csi-rs/docs/network-model.md`, and not restated in this crate.
 ///
 /// The wire strings ([`Self::as_api_value`]) are also the config-snapshot
 /// strings, via the custom `Serialize`/`Deserialize` below.
@@ -35,8 +35,16 @@ pub enum WiFiMode {
     WifiAp,
     Ht20Emitter,
     Ht40Emitter,
-    /// A profile-supplied mode string carried through the client without the
-    /// core library naming it. Any mode-specific parameters travel in
+    /// The symmetric connectionless exchange, central end.
+    EspNowCentral,
+    /// The symmetric connectionless exchange, peripheral end.
+    EspNowPeripheral,
+    /// The asymmetric exchange, flooding end — a central listener, so it reports no CSI of its own.
+    EspNowSimplexSource,
+    /// The asymmetric exchange, measuring end. The highest CSI rate of any pairing.
+    EspNowSimplexPeer,
+    /// A profile-supplied mode string carried through the client without this
+    /// crate naming it. Any mode-specific parameters travel in
     /// [`WiFiForm::wifi_extra`].
     Ext(&'static str),
 }
@@ -50,6 +58,12 @@ impl WiFiMode {
             Self::WifiAp => "wifi-ap",
             Self::Ht20Emitter => "ht20-emitter",
             Self::Ht40Emitter => "ht40-emitter",
+            Self::EspNowCentral => "esp-now-central",
+            Self::EspNowPeripheral => "esp-now-peripheral",
+            // The firmware's own strings, which are the serial contract. The server also accepts
+            // `esp-now-simplex-{source,peer}`; emitting the originals keeps older devices working.
+            Self::EspNowSimplexSource => "esp-now-fast-source",
+            Self::EspNowSimplexPeer => "esp-now-fast-collector",
             Self::Ext(s) => s,
         }
     }
@@ -67,6 +81,10 @@ impl WiFiMode {
             "wifi-ap" => Self::WifiAp,
             "ht20-emitter" => Self::Ht20Emitter,
             "ht40-emitter" => Self::Ht40Emitter,
+            "esp-now-central" => Self::EspNowCentral,
+            "esp-now-peripheral" => Self::EspNowPeripheral,
+            "esp-now-fast-source" | "esp-now-simplex-source" => Self::EspNowSimplexSource,
+            "esp-now-fast-collector" | "esp-now-simplex-peer" => Self::EspNowSimplexPeer,
             other => Self::Ext(intern(other)),
         })
     }
@@ -80,6 +98,13 @@ impl WiFiMode {
     /// this stays `false` for it.
     pub fn is_emitter(self) -> bool {
         matches!(self, Self::Ht20Emitter | Self::Ht40Emitter)
+    }
+
+    /// True for the modes that report no CSI of their own: the emitters, and the simplex source.
+    /// All three are central listeners — they put energy in the channel and measure nothing — so
+    /// there is no capture-side configuration to show for them.
+    pub fn reports_no_csi(self) -> bool {
+        self.is_emitter() || matches!(self, Self::EspNowSimplexSource)
     }
 
     /// Requires `esp-csi-cli-rs` ≥ 0.7.0 on the device.
@@ -356,6 +381,11 @@ pub enum PairingPreset {
     SoftApLab,
     Ht20EmitterSniffer,
     Ht40EmitterSniffer,
+    /// The symmetric connectionless pair. Needs no AP and no association, and both ends capture.
+    EspNowPair,
+    /// The asymmetric pair: one node owns all the transmit airtime, the other only measures.
+    /// The highest CSI rate of any two-device setup.
+    EspNowSimplexPair,
 }
 
 impl PairingPreset {
@@ -364,6 +394,8 @@ impl PairingPreset {
             Self::SoftApLab => "SoftAP lab pair",
             Self::Ht20EmitterSniffer => "HT20 emitter + sniffer",
             Self::Ht40EmitterSniffer => "HT40 emitter + sniffer",
+            Self::EspNowPair => "ESP-NOW pair",
+            Self::EspNowSimplexPair => "ESP-NOW simplex pair",
         }
     }
 

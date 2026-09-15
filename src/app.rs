@@ -733,6 +733,41 @@ impl CsiClientApp {
                 None,
                 None,
             ),
+            // The connectionless pairs need no AP and no association, so neither board takes an
+            // SSID; both ends only have to agree on the channel.
+            PairingPreset::EspNowPair => (
+                WiFiForm {
+                    mode: WiFiMode::EspNowCentral,
+                    channel: ch.clone(),
+                    ..WiFiForm::default()
+                },
+                WiFiForm {
+                    mode: WiFiMode::EspNowPeripheral,
+                    channel: ch,
+                    ..WiFiForm::default()
+                },
+                None,
+                None,
+                None,
+                None,
+            ),
+            // Device 1 floods and measures nothing; device 2 goes receive-only once it is found.
+            PairingPreset::EspNowSimplexPair => (
+                WiFiForm {
+                    mode: WiFiMode::EspNowSimplexSource,
+                    channel: ch.clone(),
+                    ..WiFiForm::default()
+                },
+                WiFiForm {
+                    mode: WiFiMode::EspNowSimplexPeer,
+                    channel: ch,
+                    ..WiFiForm::default()
+                },
+                None,
+                None,
+                None,
+                None,
+            ),
         };
 
         let mut queue = Vec::new();

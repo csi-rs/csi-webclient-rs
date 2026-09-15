@@ -510,7 +510,8 @@ fn wifi_mode_picker(
     egui::ComboBox::from_id_salt(format!("wifi_mode_combo_{device_id}"))
         .selected_text(mode.as_api_value())
         .show_ui(ui, |ui| {
-            // Collector capture paths first, then the TX-only emitters.
+            // Grouped by how the node reaches the channel: the associated and promiscuous
+            // Wi-Fi modes, then the unassociated emitters, then the connectionless exchanges.
             ui.selectable_value(mode, WiFiMode::Station, "station");
             ui.selectable_value(mode, WiFiMode::Sniffer, "sniffer");
             ui.add_enabled_ui(supports_v07, |ui| {
@@ -518,6 +519,10 @@ fn wifi_mode_picker(
             });
             ui.selectable_value(mode, WiFiMode::Ht20Emitter, "ht20-emitter");
             ui.selectable_value(mode, WiFiMode::Ht40Emitter, "ht40-emitter");
+            ui.selectable_value(mode, WiFiMode::EspNowCentral, "esp-now-central");
+            ui.selectable_value(mode, WiFiMode::EspNowPeripheral, "esp-now-peripheral");
+            ui.selectable_value(mode, WiFiMode::EspNowSimplexSource, "esp-now-simplex-source");
+            ui.selectable_value(mode, WiFiMode::EspNowSimplexPeer, "esp-now-simplex-peer");
             // Profile-supplied modes (none in the standard build).
             for extra in extra_modes {
                 ui.selectable_value(mode, WiFiMode::Ext(extra), *extra);

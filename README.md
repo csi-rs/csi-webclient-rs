@@ -12,9 +12,13 @@ This project provides a native Rust GUI (egui/eframe) that talks to a running `c
 - Connect per-device WebSockets and view incoming **serialized** CSI frame previews (COBS+postcard hex).
 - Record local **Parquet** exports (`csi_export_{id}_YYYYMMDD_HHmmss.parquet`) with a schema matching server-side dumps.
 - Switch runtime output behavior (`stream`, `dump`, `both`) per device from the UI.
-- Configure emitter/collector Wi-Fi modes (`station`, `sniffer`, `wifi-ap`, `ht20-emitter`, `ht40-emitter`) and softAP options.
+- Configure the node's **operational mode** — how it reaches the channel: `station`, `sniffer`,
+  `wifi-ap`, `ht20-emitter`, `ht40-emitter`, and the connectionless `esp-now-*` modes. The node
+  model is documented once, in
+  [`esp-csi-rs/docs/network-model.md`](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
 - Toggle off-device **CSI output** per device (capture keeps running when delivery is off).
-- Apply two-device **pairing presets** (SoftAP lab, HT20/HT40 emitter + sniffer) from the Devices tab.
+- Apply two-device **pairing presets** from the Devices tab: SoftAP lab, HT20/HT40 emitter +
+  sniffer, ESP-NOW pair, and ESP-NOW simplex pair.
 - **Save/load device configuration** as JSON snapshots (`csi_config_{id}_YYYYMMDD_HHmmss.json`; note: includes Wi-Fi passwords in plain text) and **copy configuration from one device to another** from the Config tab.
 
 ## Architecture
@@ -35,7 +39,7 @@ Top-level intent orchestration and event application happen in `src/app.rs`.
 
 ## Webserver Compatibility
 
-The client targets **`csi-webserver` ≥ 0.1.5** (multi-device API + esp-csi-cli v0.7.0 Wi-Fi modes). Key endpoints:
+The client targets **`csi-webserver` ≥ 0.2.1**. Key endpoints:
 
 - `GET /api/devices` — discover attached boards and live status
 - `GET /api/devices/{id}/info`
@@ -45,7 +49,8 @@ The client targets **`csi-webserver` ≥ 0.1.5** (multi-device API + esp-csi-cli
 - `POST /api/devices/{id}/control/*` — start, stop, reset, stats
 - `GET /api/devices/{id}/ws` — per-device WebSocket (raw serialized CSI frames)
 
-The server always runs devices in **serialized** mode; there is no `log-mode` configuration in v0.1.4.
+The server always runs devices in **serialized** mode, so there is no `log-mode` configuration on
+this surface.
 
 ## Build
 

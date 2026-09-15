@@ -238,6 +238,8 @@ fn render_pairing_presets(
                 PairingPreset::SoftApLab,
                 PairingPreset::Ht20EmitterSniffer,
                 PairingPreset::Ht40EmitterSniffer,
+                PairingPreset::EspNowPair,
+                PairingPreset::EspNowSimplexPair,
             ] {
                 if ui.button(preset.label()).clicked() {
                     intents.push(UserIntent::Device {
