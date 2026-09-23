@@ -75,8 +75,9 @@ pub trait ClientProfile {
         None
     }
 
-    /// Whether the CSI section should surface the HE-STBC numeric field.
-    fn shows_he_stbc_field(&self) -> bool {
+    /// Whether the CSI section should surface the numeric STBC field the
+    /// ESP32-C5/C6 CSI config exposes.
+    fn shows_stbc_numeric_field(&self) -> bool {
         false
     }
 }
