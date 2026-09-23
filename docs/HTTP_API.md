@@ -219,9 +219,8 @@ Client-side validation (mirrors firmware tokenizer rules):
   only for `station`, `wifi-ap`, `esp-now-central` and `esp-now-peripheral`, and
   only when the user picked a value (unset keeps the firmware default,
   collector). The server rejects it with `400` for the modes that fix the
-  collection mode (`sniffer`, the emitters, the simplex ends). A request that
-  omits `mode` is accepted with `collection`; the firmware ignores it where the
-  stored mode does not admit a choice.
+  collection mode (`sniffer`, the emitters, the simplex ends), checked against
+  the `mode` in the same request.
 - Mode `wifi-ap` requires `esp-csi-cli-rs` ≥ 0.7.0; the client gates it in the
   mode picker.
 
