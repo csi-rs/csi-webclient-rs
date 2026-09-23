@@ -8,7 +8,8 @@ This project provides a native Rust GUI (egui/eframe) that talks to a running `c
 
 - Discover and manage **multiple ESP32 devices** via `GET /api/devices` with automatic hotplug polling (~2 s).
 - Per-device configuration, control, and WebSocket streaming under `/api/devices/{id}/...`.
-- Fleet-wide **Start All / Stop All** and multi-select synchronized collection (FDM mesh).
+- Fleet-wide **Start All / Stop All** and multi-select synchronized collection across several nodes (for example a star of
+  peripherals around one central, or a point-to-point pair).
 - Connect per-device WebSockets and view incoming **serialized** CSI frame previews (COBS+postcard hex).
 - Record local **Parquet** exports (`csi_export_{id}_YYYYMMDD_HHmmss.parquet`) with a schema matching server-side dumps.
 - Switch runtime output behavior (`stream`, `dump`, `both`) per device from the UI.
@@ -39,7 +40,7 @@ Top-level intent orchestration and event application happen in `src/app.rs`.
 
 ## Webserver Compatibility
 
-The client targets **`csi-webserver` ≥ 0.2.1**. Key endpoints:
+The client targets **`csi-webserver` ≥ 0.3.0**, with `esp-csi-cli-rs` ≥ 0.8.0 on the devices. Key endpoints:
 
 - `GET /api/devices` — discover attached boards and live status
 - `GET /api/devices/{id}/info`

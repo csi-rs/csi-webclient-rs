@@ -1,7 +1,8 @@
 # HTTP and WebSocket API Reference
 
 This reference documents the endpoints and payloads that `csi-webclient`
-issues against `csi-webserver` **v0.1.5+**. Behavior, gating rules, and
+issues against `csi-webserver` **0.3.0+** (with `esp-csi-cli-rs` 0.8.0+ on the
+devices). Behavior, gating rules, and
 validation match the server-side specification.
 
 ## Base Addresses
@@ -141,7 +142,7 @@ since startup or the last `reset-config`. Sub-section objects (`wifi`,
 Notes the client relies on:
 
 - `csi_config` carries both classic-chip booleans (`lltf_enabled`,
-  `htltf_enabled`, `stbc_htltf_enabled`, `ltf_merge_enabled`) and HE-chip
+  `htltf_enabled`, `stbc_htltf_enabled`, `ltf_merge_enabled`) and ESP32-C5/C6
   `acquire_csi*` integers. Only the side that matches the connected chip
   is populated; the other stays `null`.
 - The CSI form mirrors the server's on/off toggles (`lltf`, `csi_legacy`, …).
@@ -149,7 +150,7 @@ Notes the client relies on:
   the client maps `acquire_csi* != 0` to enabled.
 - `channel_filter_enabled`, `manual_scale`, `shift` are read-only on the device —
   the client surfaces them but cannot set them via `POST /api/devices/{id}/config/csi`.
-- `dump_ack`, `csi_force_lltf`, and `csi_vht` are configurable on HE chips.
+- `dump_ack`, `csi_force_lltf`, and `csi_vht` are configurable on the ESP32-C5/C6.
 - `sta_password` is **not** in the response by design.
 - **`log_mode` is removed in v0.1.4** — the server always runs serialized mode.
 
@@ -162,7 +163,7 @@ Notes the client relies on:
 
 ```json
 {
-  "mode": "station | sniffer | wifi-ap | ht20-emitter | ht40-emitter",
+  "mode": "station | sniffer | wifi-ap | ht20-emitter | ht40-emitter | esp-now-central | esp-now-peripheral | esp-now-fast-source | esp-now-fast-collector",
   "sta_ssid": "string or null",
   "sta_password": "string or null",
   "ap_ssid": "string",
@@ -172,7 +173,8 @@ Notes the client relies on:
   "ap_burst": false,
   "channel": 6,
   "peer_mac": "string or null",
-  "ht40": "none | above | below"
+  "ht40": "none | above | below",
+  "collection": "collector | listener"
 }
 ```
 
@@ -193,16 +195,33 @@ Client-side validation (mirrors firmware tokenizer rules):
   `station` mode it is a pre-association band-selection hint (meaningful on the
   C5's 5 GHz band); leave it blank to inherit the channel from the associated AP.
   For all other modes it is the operating channel.
-- A node either **emits** (puts known RF energy on the channel, captures nothing)
-  or **collects** (captures the channel response). `station`, `sniffer` and
-  `wifi-ap` are the collector capture paths; `ht20-emitter` / `ht40-emitter` are
-  TX-only and raw-inject HT PPDUs without associating. Emitters build on every
-  chip. A [`ClientProfile`] may add further modes (see "Unknown modes" below).
-- `peer_mac` is sent only in the emitter modes: it is the destination address of
-  the injected frames, empty meaning broadcast. Unicasting to a collector's MAC
-  usually raises that collector's CSI rate.
-- `ht40` is sent only in `wifi-ap` mode: it runs the softAP itself as HT40 with
-  the given secondary channel (`none` = HT20).
+- `mode` names the node's **operational mode** — how it reaches the channel. The
+  node model (network role, collection mode, operational mode, session role) is
+  documented in
+  [`esp-csi-rs/docs/network-model.md`](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
+  `ht20-emitter` / `ht40-emitter` raw-inject HT PPDUs without associating and
+  capture nothing; they build on every chip. The simplex ends are sent as the
+  firmware's `esp-now-fast-source` / `esp-now-fast-collector`; the server also
+  accepts `esp-now-simplex-source` / `esp-now-simplex-peer`. A [`ClientProfile`]
+  may add further modes (see "Unknown modes" below).
+- `peer_mac` is sent in the emitter and ESP-NOW modes. In the emitter modes it is
+  the destination address of the injected frames, empty meaning broadcast;
+  unicasting to a collector's MAC usually raises that collector's CSI rate. In
+  the ESP-NOW modes it is the explicit peer, empty meaning automatic pairing;
+  when set, configure both nodes, each with the other's address.
+- `ht40` is sent in `wifi-ap` and the ESP-NOW modes. In `wifi-ap` it runs the
+  softAP itself as HT40 with the given secondary channel (`none` = HT20); in the
+  ESP-NOW modes it forces the per-peer TX PHY to HT40. It never selects emitter
+  bandwidth — that is the `ht40-emitter` mode.
+- `collection` is the node's collection mode, forwarded as
+  `set-wifi --collection=<value>`: a `collector` reports the CSI it captures, a
+  `listener` captures but does not report. It is optional, and the client sends it
+  only for `station`, `wifi-ap`, `esp-now-central` and `esp-now-peripheral`, and
+  only when the user picked a value (unset keeps the firmware default,
+  collector). The server rejects it with `400` for the modes that fix the
+  collection mode (`sniffer`, the emitters, the simplex ends). A request that
+  omits `mode` is accepted with `collection`; the firmware ignores it where the
+  stored mode does not admit a choice.
 - Mode `wifi-ap` requires `esp-csi-cli-rs` ≥ 0.7.0; the client gates it in the
   mode picker.
 
@@ -295,8 +314,9 @@ Applied at the start of each collection run. Default on the device is `lr`.
 
 Accepted rates: `1m`, `1m-l`, `2m`, `5m5`, `5m5-l`, `11m`, `11m-l`, `6m`,
 `9m`, `12m`, `18m`, `24m`, `36m`, `48m`, `54m`, `mcs0-lgi`..`mcs7-lgi`,
-`mcs0-sgi`. Honored by `wifi-ap` and `sniffer`; ignored by `station`, and by the
-emitter modes (which force their own TX PHY).
+`mcs0-sgi`. Reporting only (recorded in the device config), except on the
+ESP-NOW pair (`esp-now-central` / `esp-now-peripheral`), which applies it as the
+TX PHY rate.
 
 ### `POST /api/devices/{id}/config/io-tasks`
 
