@@ -1,16 +1,27 @@
+use crate::profile::ClientProfile;
 use crate::state::{DeviceAction, DeviceState};
 
 /// Render the control view for one device.
-pub fn render(ui: &mut egui::Ui, device: &mut DeviceState, actions: &mut Vec<DeviceAction>) {
+pub fn render(
+    ui: &mut egui::Ui,
+    device: &mut DeviceState,
+    actions: &mut Vec<DeviceAction>,
+    profile: &dyn ClientProfile,
+) {
     ui.add(
         egui::Label::new(format!("Control — {}", device.id))
             .wrap(),
     );
     ui.add_space(10.0);
-    render_body(ui, device, actions);
+    render_body(ui, device, actions, profile);
 }
 
-fn render_body(ui: &mut egui::Ui, device: &mut DeviceState, actions: &mut Vec<DeviceAction>) {
+fn render_body(
+    ui: &mut egui::Ui,
+    device: &mut DeviceState,
+    actions: &mut Vec<DeviceAction>,
+    profile: &dyn ClientProfile,
+) {
     ui.strong("Collection");
     ui.add_space(4.0);
 
@@ -56,22 +67,25 @@ fn render_body(ui: &mut egui::Ui, device: &mut DeviceState, actions: &mut Vec<De
         }
     });
 
-    ui.add_space(10.0);
-    ui.strong("WebSocket");
-    ui.add_space(4.0);
+    // The WebSocket streams CSI frames; hide it for modes that produce none.
+    if !profile.produces_no_csi(device.forms.wifi.mode.as_api_value()) {
+        ui.add_space(10.0);
+        ui.strong("WebSocket");
+        ui.add_space(4.0);
 
-    ui.horizontal_wrapped(|ui| {
-        if !device.ws_connected {
-            if ui.button("Connect WebSocket").clicked() {
-                actions.push(DeviceAction::ConnectWebSocket);
+        ui.horizontal_wrapped(|ui| {
+            if !device.ws_connected {
+                if ui.button("Connect WebSocket").clicked() {
+                    actions.push(DeviceAction::ConnectWebSocket);
+                }
+            } else if ui.button("Disconnect WebSocket").clicked() {
+                actions.push(DeviceAction::DisconnectWebSocket);
             }
-        } else if ui.button("Disconnect WebSocket").clicked() {
-            actions.push(DeviceAction::DisconnectWebSocket);
-        }
-        if ui.button("Clear Stream Frames").clicked() {
-            actions.push(DeviceAction::ClearFrames);
-        }
-    });
+            if ui.button("Clear Stream Frames").clicked() {
+                actions.push(DeviceAction::ClearFrames);
+            }
+        });
+    }
 
     ui.add_space(8.0);
     ui.add(

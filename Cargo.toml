@@ -1,6 +1,6 @@
 [package]
 name = "csi-webclient"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 description = "Desktop egui client for csi-webserver REST/WebSocket control and CSI stream monitoring"
 documentation = "https://docs.rs/csi-webclient"
@@ -11,7 +11,13 @@ categories = ["gui", "network-programming"]
 exclude = ["*.parquet", "run_test", "ap", "sta"]
 rust-version = "1.85"
 readme = "README.md"
-license-file = "LICENSE"
+license = "Apache-2.0"
+
+[package.metadata.docs.rs]
+# A desktop GUI: document the Linux build only. rustdoc does not link, so the
+# GTK/X11 system libraries CI installs for the test build are not needed here.
+default-target = "x86_64-unknown-linux-gnu"
+targets = ["x86_64-unknown-linux-gnu"]
 
 [dependencies]
 arrow = "56"

@@ -1,3 +1,4 @@
+use crate::profile::ClientProfile;
 use crate::state::{DeviceAction, DeviceState};
 
 /// Max height of the per-device frame list (keeps multi-device view usable).
@@ -7,12 +8,29 @@ const FRAME_LIST_HEIGHT: f32 = 220.0;
 ///
 /// Recording start/stop are queued into `actions`. The shared export directory
 /// is edited once at the top of the Stream tab (see [`render_export_dir`]).
-pub fn render(ui: &mut egui::Ui, device: &mut DeviceState, actions: &mut Vec<DeviceAction>) {
+pub fn render(
+    ui: &mut egui::Ui,
+    device: &mut DeviceState,
+    actions: &mut Vec<DeviceAction>,
+    profile: &dyn ClientProfile,
+) {
     ui.add(
         egui::Label::new(format!("Stream — {}", device.id))
             .wrap(),
     );
     ui.add_space(8.0);
+
+    // Modes that produce no CSI have nothing to stream or record.
+    if profile.produces_no_csi(device.forms.wifi.mode.as_api_value()) {
+        ui.add(
+            egui::Label::new(
+                "This Wi-Fi mode transmits only and captures no CSI — there is nothing to \
+                 stream or record.",
+            )
+            .wrap(),
+        );
+        return;
+    }
 
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut device.auto_scroll_stream, "Auto-scroll");

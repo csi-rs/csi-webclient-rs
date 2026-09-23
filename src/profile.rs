@@ -22,6 +22,44 @@ pub trait ClientProfile {
         &[]
     }
 
+    /// Additional Wi-Fi operating-mode strings appended to the core set in the
+    /// mode dropdown. Each is surfaced as [`crate::state::WiFiMode::Ext`] and
+    /// round-trips to the server verbatim.
+    fn extra_wifi_modes(&self) -> &[&'static str] {
+        &[]
+    }
+
+    /// Whether the given Wi-Fi mode (its API string) ignores the normal
+    /// device-side *capture* configuration — CSI flags, CSI delivery, IO tasks,
+    /// CSI output, PHY protocol, PHY rate, traffic, and CSI presets. When
+    /// `true`, the Config view hides those sections because they are no-ops or
+    /// conflict for that mode.
+    fn hides_capture_config(&self, mode_api: &str) -> bool {
+        let _ = mode_api;
+        false
+    }
+
+    /// Whether the given Wi-Fi mode produces no CSI at all. When `true`, the
+    /// client additionally hides CSI *consumers* — the output-mode selector,
+    /// the live Stream view, recording, and the WebSocket connect controls.
+    fn produces_no_csi(&self, mode_api: &str) -> bool {
+        let _ = mode_api;
+        false
+    }
+
+    /// Render any mode-specific Wi-Fi fields for `mode_api` into `wifi_extra`,
+    /// which is merged verbatim into the `set-wifi` request body. This is how a
+    /// profile surfaces parameters (and relabels reused ones) the core library
+    /// does not name. Called in the Wi-Fi section after the mode picker.
+    fn extra_wifi_fields(
+        &self,
+        ui: &mut egui::Ui,
+        wifi_extra: &mut std::collections::BTreeMap<String, serde_json::Value>,
+        mode_api: &str,
+    ) {
+        let _ = (ui, wifi_extra, mode_api);
+    }
+
     /// Render any extra CSI-preset buttons at the end of the CSI section.
     ///
     /// Implementations push [`DeviceAction::SetCsiPreset`] (or any other action)
@@ -37,8 +75,9 @@ pub trait ClientProfile {
         None
     }
 
-    /// Whether the CSI section should surface the HE-STBC numeric field.
-    fn shows_he_stbc_field(&self) -> bool {
+    /// Whether the CSI section should surface the numeric STBC field the
+    /// ESP32-C5/C6 CSI config exposes.
+    fn shows_stbc_numeric_field(&self) -> bool {
         false
     }
 }

@@ -42,6 +42,14 @@ impl CoreHandle {
     }
 }
 
+impl Default for CoreHandle {
+    /// Same as [`CoreHandle::new`] — constructing a handle always spawns the
+    /// worker thread; there is no inert variant.
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for CoreHandle {
     fn drop(&mut self) {
         let _ = self.cmd_tx.send(CoreCommand::Shutdown);
