@@ -581,52 +581,13 @@ impl CsiClientApp {
             channel
         };
 
-        let mut body = json!({ "mode": wifi.mode.as_api_value() });
-
-        if matches!(wifi.mode, WiFiMode::Station) {
-            if let Some(v) = empty_to_none(&wifi.sta_ssid) {
-                body["sta_ssid"] = json!(v);
+        let body = match wifi_request_body(&wifi, channel) {
+            Ok(body) => body,
+            Err(message) => {
+                self.set_error(message);
+                return;
             }
-            if let Some(v) = empty_to_none(&wifi.sta_password) {
-                body["sta_password"] = json!(v);
-            }
-        }
-
-        if matches!(wifi.mode, WiFiMode::WifiAp) {
-            body["ap_ssid"] = json!(wifi.ap_ssid.trim());
-            body["ap_password"] = json!(wifi.ap_password.trim());
-            body["ap_dhcp"] = json!(wifi.ap_dhcp);
-            body["ap_leases"] = json!(wifi.ap_leases);
-            body["ap_burst"] = json!(wifi.ap_burst);
-        }
-
-        if let Some(ch) = channel {
-            body["channel"] = json!(ch);
-        }
-
-        // `peer_mac` is the injection destination (emitter modes); `ht40` runs
-        // the softAP as HT40 (`wifi-ap` only). Two unrelated knobs — send each
-        // only where the firmware reads it.
-        if wifi.mode.is_emitter() {
-            let peer_mac = wifi.peer_mac.trim();
-            if !peer_mac.is_empty() {
-                if let Err(message) = validate_peer_mac(peer_mac) {
-                    self.set_error(message);
-                    return;
-                }
-            }
-            body["peer_mac"] = json!(peer_mac);
-        }
-        if matches!(wifi.mode, WiFiMode::WifiAp) {
-            body["ht40"] = json!(wifi.ht40.as_api_value());
-        }
-
-        // Profile-supplied, mode-specific params (e.g. emitter fields, or a
-        // relabelled destination MAC). Merged verbatim; the server routes known
-        // keys to their named fields and passes the rest through generically.
-        for (key, value) in &wifi.wifi_extra {
-            body[key] = value.clone();
-        }
+        };
 
         // Keep the stored form in sync with what was submitted — a no-op for
         // UI-driven edits (the form was the source), but required for the
@@ -1365,7 +1326,7 @@ fn validate_full_config(device: &DeviceState) -> Result<(), String> {
     if !wifi.channel.trim().is_empty() && parse_optional_u16(&wifi.channel).is_none() {
         return Err("Wi-Fi channel must be a valid number".to_owned());
     }
-    if wifi.mode.is_emitter() && !wifi.peer_mac.trim().is_empty() {
+    if wifi.mode.uses_peer_mac() && !wifi.peer_mac.trim().is_empty() {
         validate_peer_mac(wifi.peer_mac.trim())?;
     }
     if parse_required_u64(&forms.traffic.frequency_hz).is_none() {
@@ -1494,6 +1455,64 @@ fn empty_to_none(input: &str) -> Option<String> {
     }
 }
 
+/// Build the `POST …/config/wifi` body for `wifi`, sending each field only for
+/// the modes whose firmware reads it. `channel` is the already-parsed channel.
+fn wifi_request_body(wifi: &WiFiForm, channel: Option<u16>) -> Result<serde_json::Value, String> {
+    let mut body = json!({ "mode": wifi.mode.as_api_value() });
+
+    if matches!(wifi.mode, WiFiMode::Station) {
+        if let Some(v) = empty_to_none(&wifi.sta_ssid) {
+            body["sta_ssid"] = json!(v);
+        }
+        if let Some(v) = empty_to_none(&wifi.sta_password) {
+            body["sta_password"] = json!(v);
+        }
+    }
+
+    if matches!(wifi.mode, WiFiMode::WifiAp) {
+        body["ap_ssid"] = json!(wifi.ap_ssid.trim());
+        body["ap_password"] = json!(wifi.ap_password.trim());
+        body["ap_dhcp"] = json!(wifi.ap_dhcp);
+        body["ap_leases"] = json!(wifi.ap_leases);
+        body["ap_burst"] = json!(wifi.ap_burst);
+    }
+
+    if let Some(ch) = channel {
+        body["channel"] = json!(ch);
+    }
+
+    // `peer_mac` is the injection destination (emitter modes) or the
+    // explicit peer (ESP-NOW modes); `ht40` runs the softAP as HT40
+    // (`wifi-ap`) or forces the per-peer TX PHY (ESP-NOW modes). Send each
+    // only where the firmware reads it.
+    if wifi.mode.uses_peer_mac() {
+        let peer_mac = wifi.peer_mac.trim();
+        if !peer_mac.is_empty() {
+            validate_peer_mac(peer_mac)?;
+        }
+        body["peer_mac"] = json!(peer_mac);
+    }
+    if wifi.mode.uses_ht40() {
+        body["ht40"] = json!(wifi.ht40.as_api_value());
+    }
+
+    // The collection mode, only where the mode admits a choice (the server
+    // rejects it for the modes that fix it). Unset = firmware default.
+    if wifi.mode.admits_collection_choice() {
+        if let Some(collection) = wifi.collection {
+            body["collection"] = json!(collection.as_api_value());
+        }
+    }
+
+    // Profile-supplied, mode-specific params (e.g. emitter fields, or a
+    // relabelled destination MAC). Merged verbatim; the server routes known
+    // keys to their named fields and passes the rest through generically.
+    for (key, value) in &wifi.wifi_extra {
+        body[key] = value.clone();
+    }
+    Ok(body)
+}
+
 /// Render one tab selector button and switch active tab on click.
 fn tab_button(ui: &mut egui::Ui, state: &mut AppState, tab: Tab, label: &str) {
     let selected = state.transient.active_tab == tab;
@@ -1505,6 +1524,7 @@ fn tab_button(ui: &mut egui::Ui, state: &mut AppState, tab: Tab, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::{CollectionMode, Ht40Mode};
 
     #[test]
     fn full_config_steps_cover_every_section_in_order() {
@@ -1593,6 +1613,67 @@ mod tests {
         assert!(!app.state.transient.error_message.is_empty());
         let device = app.state.devices.iter().find(|d| d.id == "dev-a").unwrap();
         assert_eq!(device.forms.traffic.frequency_hz, "fast");
+    }
+
+    #[test]
+    fn wifi_body_sends_collection_only_where_the_mode_admits_it() {
+        for mode in [
+            WiFiMode::Station,
+            WiFiMode::WifiAp,
+            WiFiMode::EspNowCentral,
+            WiFiMode::EspNowPeripheral,
+        ] {
+            let wifi = WiFiForm {
+                mode,
+                collection: Some(CollectionMode::Listener),
+                ..WiFiForm::default()
+            };
+            let body = wifi_request_body(&wifi, None).unwrap();
+            assert_eq!(body["collection"], "listener", "{mode:?}");
+        }
+        for mode in [
+            WiFiMode::Sniffer,
+            WiFiMode::Ht20Emitter,
+            WiFiMode::Ht40Emitter,
+            WiFiMode::EspNowSimplexSource,
+            WiFiMode::EspNowSimplexPeer,
+        ] {
+            let wifi = WiFiForm {
+                mode,
+                collection: Some(CollectionMode::Listener),
+                ..WiFiForm::default()
+            };
+            let body = wifi_request_body(&wifi, None).unwrap();
+            assert!(body.get("collection").is_none(), "{mode:?}");
+        }
+        // Unset is omitted, leaving the firmware default.
+        let body = wifi_request_body(&WiFiForm::default(), None).unwrap();
+        assert!(body.get("collection").is_none());
+    }
+
+    #[test]
+    fn wifi_body_sends_peer_and_ht40_in_the_esp_now_modes() {
+        let wifi = WiFiForm {
+            mode: WiFiMode::EspNowSimplexPeer,
+            peer_mac: "aa:bb:cc:dd:ee:ff".to_owned(),
+            ht40: Ht40Mode::Above,
+            ..WiFiForm::default()
+        };
+        let body = wifi_request_body(&wifi, Some(6)).unwrap();
+        assert_eq!(body["peer_mac"], "aa:bb:cc:dd:ee:ff");
+        assert_eq!(body["ht40"], "above");
+
+        let wifi = WiFiForm {
+            mode: WiFiMode::EspNowCentral,
+            peer_mac: "zz:zz".to_owned(),
+            ..WiFiForm::default()
+        };
+        assert!(wifi_request_body(&wifi, None).is_err());
+
+        // Station reads neither.
+        let body = wifi_request_body(&WiFiForm::default(), None).unwrap();
+        assert!(body.get("peer_mac").is_none());
+        assert!(body.get("ht40").is_none());
     }
 
     #[test]

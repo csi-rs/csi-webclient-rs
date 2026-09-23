@@ -1,6 +1,6 @@
 use crate::profile::ClientProfile;
 use crate::state::{
-    CsiDeliveryMode, CsiForm, DeviceAction, DeviceState, Ht40Mode, OutputMode, PHY_RATES, WiFiMode,
+    CollectionMode, CsiDeliveryMode, CsiForm, DeviceAction, DeviceState, Ht40Mode, OutputMode, PHY_RATES, WiFiMode,
     WifiProtocol,
 };
 
@@ -150,6 +150,44 @@ fn render_body(
             );
         }
 
+        if forms.wifi.mode.is_esp_now() {
+            form_row(ui, "Peer MAC", |ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut forms.wifi.peer_mac)
+                        .hint_text("auto")
+                        .desired_width(field_width),
+                );
+            });
+
+            // `--ht40` here forces the per-peer TX PHY to HT40; none = HT20.
+            form_row(ui, "HT40 secondary", |ui| {
+                ht40_picker(ui, &mut forms.wifi.ht40);
+            });
+
+            ui.add_space(4.0);
+            ui.add(
+                egui::Label::new(
+                    "Peer MAC: empty = automatic pairing. When set, configure both nodes, \
+                     each with the other's address. HT40 forces the per-peer TX PHY to \
+                     40 MHz on the given secondary channel.",
+                )
+                .wrap(),
+            );
+        }
+
+        if forms.wifi.mode.admits_collection_choice() {
+            form_row(ui, "Collection", |ui| {
+                collection_picker(ui, &mut forms.wifi.collection);
+            });
+            ui.add(
+                egui::Label::new(
+                    "Collector reports the CSI it captures; listener captures but does not \
+                     report. Unset keeps the firmware default (collector).",
+                )
+                .wrap(),
+            );
+        }
+
         // Mode-specific fields supplied by the profile (e.g. emitter params);
         // relabels/reuses fields the core does not name for this mode. Rendered
         // before the Apply button so they are included in the submitted form.
@@ -278,8 +316,8 @@ fn render_body(
         });
         ui.add(
             egui::Label::new(
-                "Honored by wifi-ap and sniffer; ignored by station, and by the emitter \
-                 modes (which force their own TX PHY).",
+                "Reporting only, except on the ESP-NOW pair (esp-now-central / \
+                 esp-now-peripheral), which applies it as the TX PHY rate.",
             )
             .wrap(),
         );
@@ -537,6 +575,17 @@ fn ht40_picker(ui: &mut egui::Ui, mode: &mut Ht40Mode) {
             ui.selectable_value(mode, Ht40Mode::None, "none");
             ui.selectable_value(mode, Ht40Mode::Above, "above");
             ui.selectable_value(mode, Ht40Mode::Below, "below");
+        });
+}
+
+fn collection_picker(ui: &mut egui::Ui, collection: &mut Option<CollectionMode>) {
+    let label = collection.map_or("default (collector)", CollectionMode::as_api_value);
+    egui::ComboBox::from_id_salt("collection_combo")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            ui.selectable_value(collection, None, "default (collector)");
+            ui.selectable_value(collection, Some(CollectionMode::Collector), "collector");
+            ui.selectable_value(collection, Some(CollectionMode::Listener), "listener");
         });
 }
 

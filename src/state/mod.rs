@@ -15,10 +15,11 @@ pub enum Tab {
 
 /// Wi-Fi operating modes accepted by `POST /api/devices/{id}/config/wifi`.
 ///
-/// Each value names one **operational mode** — how a node reaches the channel. The other
-/// attributes that describe a node (network role, collection mode, session role) are carried by
-/// the mode rather than chosen here. The model is documented once, in
-/// `esp-csi-rs/docs/network-model.md`, and not restated in this crate.
+/// Each value names one **operational mode** — how a node reaches the channel. The mode fixes
+/// the node's network role; the collection mode is fixed by some modes and chosen for others
+/// (see [`Self::admits_collection_choice`] and [`CollectionMode`]). The model is documented once,
+/// in [`docs/network-model.md`](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md),
+/// and not restated in this crate.
 ///
 /// The wire strings ([`Self::as_api_value`]) are also the config-snapshot
 /// strings, via the custom `Serialize`/`Deserialize` below.
@@ -101,10 +102,48 @@ impl WiFiMode {
     }
 
     /// True for the modes that report no CSI of their own: the emitters, and the simplex source.
-    /// All three are central listeners — they put energy in the channel and measure nothing — so
-    /// there is no capture-side configuration to show for them.
+    /// All three are central listeners: a listener captures but does not report, and an emitter
+    /// captures nothing at all. Either way there is no capture-side configuration to show.
     pub fn reports_no_csi(self) -> bool {
         self.is_emitter() || matches!(self, Self::EspNowSimplexSource)
+    }
+
+    /// True for the four ESP-NOW modes (the symmetric pair and both simplex ends).
+    ///
+    /// These read `peer_mac` as the explicit ESP-NOW peer (set it on both nodes) and `ht40` as
+    /// the forced per-peer TX PHY.
+    pub fn is_esp_now(self) -> bool {
+        matches!(
+            self,
+            Self::EspNowCentral
+                | Self::EspNowPeripheral
+                | Self::EspNowSimplexSource
+                | Self::EspNowSimplexPeer
+        )
+    }
+
+    /// Whether this mode lets the collection mode be chosen (`set-wifi --collection`).
+    ///
+    /// True for `station`, `wifi-ap`, `esp-now-central` and `esp-now-peripheral`. Every other
+    /// built-in mode fixes it: the sniffer is a collector, the emitters are listeners, and each
+    /// simplex end is fixed by the end. The server rejects `collection` for those modes, so the
+    /// client never sends it there. A profile-supplied [`Self::Ext`] mode returns `false`; a
+    /// profile that wants the field sends it through [`WiFiForm::wifi_extra`].
+    pub fn admits_collection_choice(self) -> bool {
+        matches!(
+            self,
+            Self::Station | Self::WifiAp | Self::EspNowCentral | Self::EspNowPeripheral
+        )
+    }
+
+    /// True for the modes that read `peer_mac`: the emitters and the ESP-NOW modes.
+    pub fn uses_peer_mac(self) -> bool {
+        self.is_emitter() || self.is_esp_now()
+    }
+
+    /// True for the modes that read `ht40`: `wifi-ap` and the ESP-NOW modes.
+    pub fn uses_ht40(self) -> bool {
+        matches!(self, Self::WifiAp) || self.is_esp_now()
     }
 
     /// Requires `esp-csi-cli-rs` ≥ 0.7.0 on the device.
@@ -155,9 +194,10 @@ impl Default for CsiOutputForm {
     }
 }
 
-/// SoftAP HT40 secondary-channel selection (`set-wifi --ht40`).
+/// HT40 secondary-channel selection (`set-wifi --ht40`).
 ///
-/// Only meaningful in `wifi-ap` mode; ignored by the firmware otherwise.
+/// In `wifi-ap` it runs the softAP as HT40; in the ESP-NOW modes it forces the per-peer TX PHY to
+/// HT40. Ignored by the other modes (emitter bandwidth is chosen by the mode, not this field).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Ht40Mode {
@@ -183,6 +223,37 @@ impl Ht40Mode {
             "none" | "off" => Some(Self::None),
             "above" => Some(Self::Above),
             "below" => Some(Self::Below),
+            _ => None,
+        }
+    }
+}
+
+/// Collection mode of a node (`set-wifi --collection=collector|listener`).
+///
+/// A collector reports the CSI it captures; a listener captures but does not report. Only sent
+/// for the modes that admit a choice ([`WiFiMode::admits_collection_choice`]); `None` leaves the
+/// field out of the request, so the firmware keeps its default (collector).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CollectionMode {
+    Collector,
+    Listener,
+}
+
+impl CollectionMode {
+    /// Convert enum variant to backend API value.
+    pub fn as_api_value(self) -> &'static str {
+        match self {
+            Self::Collector => "collector",
+            Self::Listener => "listener",
+        }
+    }
+
+    /// Resolve a backend value back to a variant.
+    pub fn from_api_value(value: &str) -> Option<Self> {
+        match value {
+            "collector" => Some(Self::Collector),
+            "listener" => Some(Self::Listener),
             _ => None,
         }
     }
@@ -314,7 +385,8 @@ impl<'de> Deserialize<'de> for WifiProtocol {
 
 /// PHY rate options accepted by `POST /api/devices/{id}/config/rate`.
 ///
-/// Honored by all modes except `station` on the firmware side.
+/// Reporting only (recorded in the device config), except on the ESP-NOW pair
+/// (`esp-now-central` / `esp-now-peripheral`), which applies it as the TX PHY rate.
 pub const PHY_RATES: &[&str] = &[
     "1m", "1m-l", "2m", "5m5", "5m5-l", "11m", "11m-l", "6m", "9m", "12m", "18m", "24m", "36m",
     "48m", "54m", "mcs0-lgi", "mcs1-lgi", "mcs2-lgi", "mcs3-lgi", "mcs4-lgi", "mcs5-lgi",
@@ -339,12 +411,20 @@ pub struct WiFiForm {
     /// of round-robining one station per tick.
     pub ap_burst: bool,
     pub channel: String,
-    /// Destination address of injected frames (`aa:bb:cc:dd:ee:ff`); empty means
-    /// broadcast. Emitter modes only. Unicasting to a collector's MAC usually
-    /// raises that collector's CSI rate.
+    /// Peer address (`aa:bb:cc:dd:ee:ff`). In the emitter modes it is the
+    /// destination of injected frames (empty = broadcast; unicasting to a
+    /// collector's MAC usually raises that collector's CSI rate). In the ESP-NOW
+    /// modes it is the explicit peer (empty = automatic pairing; when set, set
+    /// it on both nodes, each naming the other).
     pub peer_mac: String,
-    /// SoftAP HT40 secondary channel. `wifi-ap` mode only.
+    /// HT40 secondary channel: the softAP bandwidth in `wifi-ap`, the forced
+    /// per-peer TX PHY in the ESP-NOW modes.
     pub ht40: Ht40Mode,
+    /// Collection mode, for the modes that admit a choice
+    /// ([`WiFiMode::admits_collection_choice`]). `None` omits it from the
+    /// request (the firmware default, collector).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<CollectionMode>,
     /// Mode-specific parameters supplied by a [`crate::profile::ClientProfile`]
     /// (via [`ClientProfile::extra_wifi_fields`](crate::profile::ClientProfile::extra_wifi_fields)).
     /// Merged verbatim into the `set-wifi` request body, so the core library
@@ -367,12 +447,14 @@ impl Default for WiFiForm {
             channel: String::new(),
             peer_mac: String::new(),
             ht40: Ht40Mode::None,
+            collection: None,
             wifi_extra: BTreeMap::new(),
         }
     }
 }
 
-/// Pairing cookbook from esp-csi-cli-rs WEBSERVER.md (two-device setups).
+/// Two-device pairing presets, after the esp-csi-cli-rs
+/// [configuration examples](https://github.com/csi-rs/esp-csi-cli-rs/blob/master/docs/configuration-examples.md).
 ///
 /// The emitter pairs put device 1 in a TX-only emitter mode and device 2 in
 /// `sniffer` on the same channel — the capture path that pairs with an emitter.
@@ -438,7 +520,7 @@ pub struct CsiForm {
     pub htltf: bool,
     pub stbc_htltf: bool,
     pub ltf_merge: bool,
-    // HE (ESP32-C5 / C6)
+    // ESP32-C5 / C6
     pub csi: bool,
     pub csi_legacy: bool,
     pub csi_ht20: bool,
@@ -807,6 +889,12 @@ impl DeviceState {
                     applied += 1;
                 }
             }
+            if let Some(collection) = wifi.collection.as_deref() {
+                if let Some(parsed) = CollectionMode::from_api_value(collection) {
+                    forms.wifi.collection = Some(parsed);
+                    applied += 1;
+                }
+            }
         }
 
         if let Some(collection) = config.collection.as_ref() {
@@ -927,7 +1015,7 @@ pub enum UserIntent {
     StartAllCollections { duration_seconds: String },
     /// Stop collection on every attached device.
     StopAllCollections,
-    /// Start collection on every selected device (synchronized FDM start).
+    /// Start collection on every selected device (synchronized start).
     StartSelectedCollections { duration_seconds: String },
     /// Stop collection on every selected device.
     StopSelectedCollections,
@@ -1017,6 +1105,9 @@ pub struct DeviceWifiConfig {
     pub ap_burst: Option<bool>,
     pub peer_mac: Option<String>,
     pub ht40: Option<String>,
+    /// Collection mode, if the server reports it.
+    #[serde(default)]
+    pub collection: Option<String>,
 }
 
 /// Collection section of `GET /api/devices/{id}/config`.
@@ -1033,7 +1124,7 @@ pub struct DeviceCollectionConfig {
 
 /// CSI section of `GET /api/devices/{id}/config`.
 ///
-/// Mirrors firmware `show-config`: classic-chip booleans, HE-chip
+/// Mirrors firmware `show-config`: classic-chip booleans, ESP32-C5/C6
 /// `acquire_csi*` integers, plus read-only fields the device exposes
 /// but does not accept via `POST /api/devices/{id}/config/csi`.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1173,7 +1264,7 @@ pub struct AppState {
     pub export_dir: String,
     pub devices: Vec<DeviceState>,
     /// Devices currently selected for the detail tabs. Multiple devices can be
-    /// selected at once for side-by-side (FDM mesh) collection.
+    /// selected at once for side-by-side multi-node collection.
     pub selected_device_ids: Vec<String>,
     pub transient: TransientUiState,
     pub events: Vec<String>,
