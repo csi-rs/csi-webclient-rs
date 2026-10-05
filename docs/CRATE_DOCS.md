@@ -12,6 +12,7 @@ effects separate so behavior stays maintainable as protocol features evolve.
 - `state`: source-of-truth state models, user intents, and API-facing enum mappings.
 - `core`: side-effect layer for HTTP requests, WebSocket receive loop, and worker runtime.
 - `export`: host-side serialized CSI decoder and Parquet writer for local recordings.
+- `wire`: the esp-csi-rs 0.12 wire contract, vendored from `esp-csi-rs/src/lib/wire`.
 - `ui`: rendering modules for each tab (devices/dashboard/config/control/stream) without direct IO.
 
 ## Runtime Flow
@@ -103,4 +104,5 @@ softAP as HT40; in the ESP-NOW modes it forces the per-peer TX PHY.
 - API responses are parsed best-effort from either a generic envelope
   (`success`/`message`/`data`) or direct JSON payload.
 - WebSocket text and binary messages are both stored as frame bytes for stream inspection.
-- Local Parquet recordings use the same schema as server-side `csi_dump_*.parquet` files.
+- Local Parquet recordings decode the esp-csi-rs 0.12 wire format, and the 0.8 – 0.11 layout as
+  a fallback. Their schema is versioned through the `schema_version` file metadata entry.

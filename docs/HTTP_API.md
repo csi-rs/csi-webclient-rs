@@ -381,8 +381,13 @@ The client can independently record WebSocket frames to Parquet files on
 the host:
 
 - Filename: `csi_export_{id}_YYYYMMDD_HHmmss.parquet`
-- Schema matches server-side `csi_dump_*.parquet` (superset, chip-specific
-  columns nullable, includes `host_rx_time`).
+- Frames are decoded as the esp-csi-rs 0.12 wire format, or as the 0.8 – 0.11
+  `CSIDataPacket` layout of the device's chip when the firmware predates it.
+- The schema is versioned: the file's key-value metadata carries
+  `schema_version` (currently `2`) and the `wire_version` decoded. Columns a
+  frame cannot fill are null. The column list is documented in
+  `src/export/parquet_sink.rs`. It is no longer identical to the server's
+  `csi_dump_*.parquet`.
 
 ## Status-Code Hints Surfaced By The Client
 

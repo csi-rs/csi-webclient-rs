@@ -69,7 +69,8 @@ pub trait ClientProfile {
     }
 
     /// Map a numeric `cur_bb_format` to a stable `data_format` label for the
-    /// Parquet export. `None` falls back to the decoded `RxCsiFmt::as_str()`.
+    /// Parquet export. `cur_bb_format` comes from the frame's `VendorRx::EspHe` fields. `None`
+    /// falls back to the 0.11-vocabulary name (`RxCsiFmt::as_str()`).
     fn label_format(&self, cur_bb_format: u32) -> Option<&'static str> {
         let _ = cur_bb_format;
         None
