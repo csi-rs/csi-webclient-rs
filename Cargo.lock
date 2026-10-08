@@ -1067,13 +1067,15 @@ dependencies = [
 
 [[package]]
 name = "csi-webclient"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "arrow",
  "chrono",
+ "cobs",
  "eframe",
  "egui",
  "futures-util",
+ "heapless",
  "parquet",
  "postcard",
  "reqwest",
@@ -3161,7 +3163,19 @@ dependencies = [
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
  "heapless",
+ "postcard-derive",
  "serde",
+]
+
+[[package]]
+name = "postcard-derive"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0232bd009a197ceec9cc881ba46f727fcd8060a2d8d6a9dde7a69030a6fe2bb"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

@@ -11,7 +11,8 @@ This project provides a native Rust GUI (egui/eframe) that talks to a running `c
 - Fleet-wide **Start All / Stop All** and multi-select synchronized collection across several nodes (for example a star of
   peripherals around one central, or a point-to-point pair).
 - Connect per-device WebSockets and view incoming **serialized** CSI frame previews (COBS+postcard hex).
-- Record local **Parquet** exports (`csi_export_{id}_YYYYMMDD_HHmmss.parquet`) with a schema matching server-side dumps.
+- Record local **Parquet** exports (`csi_export_{id}_YYYYMMDD_HHmmss.parquet`) with a versioned schema
+  (`schema_version` file metadata).
 - Switch runtime output behavior (`stream`, `dump`, `both`) per device from the UI.
 - Configure the node's **operational mode** — how it reaches the channel: `station`, `sniffer`,
   `wifi-ap`, `ht20-emitter`, `ht40-emitter`, and the connectionless `esp-now-*` modes. The node
@@ -30,6 +31,7 @@ The codebase intentionally separates responsibilities into three domains:
 - `src/ui`: rendering-only modules (dumb UI, no network/business orchestration).
 - `src/core`: side effects (HTTP requests, WebSocket loop, async runtime, channels).
 - `src/export`: host-side serialized CSI decoder and Parquet writer.
+- `src/wire`: the esp-csi-rs wire contract, vendored (see below).
 
 Top-level intent orchestration and event application happen in `src/app.rs`.
 
@@ -52,6 +54,15 @@ The client targets **`csi-webserver` ≥ 0.3.0**, with `esp-csi-cli-rs` ≥ 0.8.
 
 The server always runs devices in **serialized** mode, so there is no `log-mode` configuration on
 this surface.
+
+## Firmware Wire Format
+
+Recordings decode the versioned wire format of **esp-csi-rs 0.12** (`WIRE_VERSION` 1). Firmware from
+0.8 to 0.11 is still decoded, from the device's chip. A frame from a newer wire version is counted as
+a decode error, not mis-read.
+
+`src/wire` is a copy of `esp-csi-rs/src/lib/wire` at the 0.12.0 tag. Do not edit it by hand: copy
+the files again when the firmware's wire format changes.
 
 ## Build
 

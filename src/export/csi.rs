@@ -1,592 +1,498 @@
-//! Host-side decoder for the firmware's `serialized` CSI wire format.
+//! Host-side decoder for the firmware's `serialized` CSI output.
 //!
-//! WebSocket frames from `csi-webserver-rs` are the device's `serialized`
-//! records: each is `postcard::to_slice_cobs(&CSIDataPacket)` — a COBS-framed,
-//! postcard-encoded struct — with the trailing `\0` COBS terminator stripped by
-//! the server. This module mirrors that on-device struct so the client can
-//! decode frames into typed fields for local Parquet export, exactly as the
-//! server does for its own dumps.
+//! WebSocket frames from `csi-webserver-rs` are the device's serialized records, one COBS frame each
+//! (the server strips the trailing `\0`). esp-csi-rs 0.12 encodes them in the versioned
+//! [`crate::wire`] format: `postcard(Envelope) ++ postcard(Body)`. Firmware from 0.8 to 0.11 sent a
+//! chip-specific `CSIDataPacket` instead, which [`super::legacy`] still decodes when the chip is
+//! known.
 //!
-//! ## Why the struct is mirrored, not imported
-//! `esp-csi-rs` is an `esp-hal` crate and cannot compile for a desktop host, so
-//! the wire types are re-declared here. postcard is **not** self-describing and
-//! uses varint encoding, so these mirrors must match the firmware field-for-
-//! field, in order. **Pinned to `esp-csi-rs` 0.8.0.** When the firmware bumps
-//! its protocol/struct, update these definitions in lockstep with the server.
+//! [`FrameDecoder`] tries the wire format first and falls back to the legacy layout, then sticks to
+//! whichever format the stream turned out to use. The two cannot be confused on a real stream: a
+//! wire frame starts with [`wire::WIRE_VERSION`] (`0x01`), while a legacy frame starts with the
+//! transmitter MAC, whose first octet never has the group bit (`0x01`) set.
 
-use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
-/// Which on-device `CSIDataPacket` layout a connected chip produces.
+use super::legacy::{self, RxCsiFmt};
+use crate::wire::{
+    self, Body, Chip, CsiFrame, CsiPayload, Envelope, HeaderDigest, LayoutId, PpduFormat, RxMeta,
+    SessionInfo, SourceKind, Stimulus, VendorRx,
+};
+
+/// Which serialized format a stream uses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ChipVariant {
-    /// esp32, esp32c3, esp32s3 — the full radio-metadata layout ([`PacketA`]).
-    Esp32Family,
-    /// esp32c5 — the reduced layout without the c6-only fields ([`PacketBc5`]).
-    Esp32c5,
-    /// esp32c6 — the reduced layout plus `sigb_len`/`cur_single_mpdu`/`rxmatch0`.
-    Esp32c6,
+pub enum StreamFormat {
+    /// esp-csi-rs 0.12+: the versioned [`crate::wire`] format.
+    Wire,
+    /// esp-csi-rs 0.8 – 0.11: the chip-specific `CSIDataPacket`.
+    Legacy,
 }
 
-impl ChipVariant {
-    /// Map a firmware `chip=` string (case-insensitive) to its wire layout.
-    ///
-    /// Returns `None` for unrecognized chips so the caller can refuse to decode
-    /// rather than guess a layout.
-    pub fn from_chip_str(chip: &str) -> Option<Self> {
-        match chip.trim().to_ascii_lowercase().as_str() {
-            "esp32" | "esp32c3" | "esp32s3" | "esp32s2" => Some(Self::Esp32Family),
-            "esp32c5" => Some(Self::Esp32c5),
-            "esp32c6" => Some(Self::Esp32c6),
+/// A grouped, quantised channel report ([`CsiPayload::Grouped`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GroupedReport {
+    /// Subcarrier grouping.
+    pub ng: u8,
+    /// Bits per quantised value.
+    pub nb: u8,
+    /// Index of the first reported subcarrier.
+    pub sc_start: i16,
+    /// Number of reported subcarriers.
+    pub n_sc: u16,
+    /// Receive chains.
+    pub n_rx: u8,
+    /// Transmit chains.
+    pub n_tx: u8,
+    /// Packed report.
+    pub data: Vec<u8>,
+}
+
+/// One decoded CSI measurement, whatever format it arrived in. This is what the Parquet sink
+/// writes.
+#[derive(Debug, Clone)]
+pub struct CsiRecord {
+    /// The format the frame arrived in.
+    pub format: StreamFormat,
+    /// The frame's envelope. `None` for a legacy frame.
+    pub envelope: Option<Envelope>,
+    /// The measurement, in wire terms. A legacy frame is mapped onto these types.
+    pub frame: CsiFrame,
+    /// The chip that produced the measurement: from an `EspRaw` payload, else from the session
+    /// announcement.
+    pub chip: Option<Chip>,
+    /// Wall-clock receive time (UNIX epoch, microseconds), when the session announcement anchored
+    /// the node's clock.
+    pub device_time_unix_us: Option<i64>,
+    /// A legacy packet's own `data_format`.
+    pub legacy_format: Option<RxCsiFmt>,
+}
+
+impl CsiRecord {
+    /// The raw CSI buffer: `EspRaw` bytes, empty for other payloads.
+    pub fn csi_data(&self) -> &[i8] {
+        match &self.frame.payload {
+            CsiPayload::EspRaw { bytes, .. } => bytes,
+            _ => &[],
+        }
+    }
+
+    /// The `EspRaw` buffer's layout.
+    pub fn layout(&self) -> Option<LayoutId> {
+        match &self.frame.payload {
+            CsiPayload::EspRaw { layout, .. } => Some(*layout),
+            _ => None,
+        }
+    }
+
+    /// The `EspRaw` buffer's first-word-invalid flag.
+    pub fn first_word_invalid(&self) -> Option<bool> {
+        match &self.frame.payload {
+            CsiPayload::EspRaw { first_word_invalid, .. } => Some(*first_word_invalid),
+            _ => None,
+        }
+    }
+
+    /// The `Variation` payload's value.
+    pub fn variation(&self) -> Option<u16> {
+        match &self.frame.payload {
+            CsiPayload::Variation { value } => Some(*value),
+            _ => None,
+        }
+    }
+
+    /// The `Grouped` payload.
+    pub fn grouped(&self) -> Option<GroupedReport> {
+        match &self.frame.payload {
+            CsiPayload::Grouped { ng, nb, sc_start, n_sc, n_rx, n_tx, data } => Some(GroupedReport {
+                ng: *ng,
+                nb: *nb,
+                sc_start: *sc_start,
+                n_sc: *n_sc,
+                n_rx: *n_rx,
+                n_tx: *n_tx,
+                data: data.to_vec(),
+            }),
+            _ => None,
+        }
+    }
+
+    /// `cur_bb_format` from [`VendorRx::EspHe`].
+    pub fn cur_bb_format(&self) -> Option<u8> {
+        match self.frame.meta.vendor {
+            VendorRx::EspHe { cur_bb_format, .. } => Some(cur_bb_format),
+            _ => None,
+        }
+    }
+
+    /// The 0.11-vocabulary `data_format` name: the legacy packet's own, else derived from the
+    /// metadata.
+    pub fn data_format(&self) -> RxCsiFmt {
+        self.legacy_format
+            .unwrap_or_else(|| legacy::data_format_of(&self.frame.meta))
+    }
+
+    /// Subcarrier indices, one per reported value, in buffer order. Derived from the `EspRaw`
+    /// [`LayoutId`] (`None` when it is `Unknown` or disagrees with the buffer length), or from a
+    /// `Grouped` report's start and grouping.
+    pub fn subcarrier_indices(&self) -> Option<Vec<i16>> {
+        match &self.frame.payload {
+            CsiPayload::EspRaw { layout, bytes, .. } => {
+                (layout.byte_len() == Some(bytes.len()))
+                    .then(|| layout.indices().map(|(_, i)| i).collect())
+            }
+            CsiPayload::Grouped { ng, sc_start, n_sc, .. } => Some(
+                (0..*n_sc)
+                    .map(|k| sc_start.saturating_add((k as i16).saturating_mul(*ng as i16)))
+                    .collect(),
+            ),
+            _ => None,
+        }
+    }
+
+    /// Subcarrier frequency offsets from the centre the indices refer to, Hz: index × the training
+    /// field's spacing. Same length and order as [`Self::subcarrier_indices`]. A `Grouped` report
+    /// uses the HE spacing for an HE PPDU and the legacy spacing otherwise.
+    pub fn subcarrier_freqs_hz(&self) -> Option<Vec<i32>> {
+        match &self.frame.payload {
+            CsiPayload::EspRaw { layout, bytes, .. } => (layout.byte_len() == Some(bytes.len()))
+                .then(|| {
+                    layout
+                        .indices()
+                        .map(|(ltf, i)| i32::from(i) * ltf.spacing_hz() as i32)
+                        .collect()
+                }),
+            CsiPayload::Grouped { .. } => {
+                let spacing = if is_he(self.frame.meta.ppdu) {
+                    wire::layout::SPACING_HZ_HE
+                } else {
+                    wire::layout::SPACING_HZ_LEGACY
+                } as i32;
+                self.subcarrier_indices()
+                    .map(|v| v.into_iter().map(|i| i32::from(i) * spacing).collect())
+            }
             _ => None,
         }
     }
 }
 
-/// Optional NTP-derived calendar timestamp the firmware may attach to a packet.
-///
-/// Mirror of `esp_csi_rs::time::DateTime` (all fields `u64`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DateTime {
-    pub year: u64,
-    pub month: u64,
-    pub day: u64,
-    pub hour: u64,
-    pub minute: u64,
-    pub second: u64,
-    pub millisecond: u64,
+fn is_he(p: PpduFormat) -> bool {
+    matches!(p, PpduFormat::HeSu | PpduFormat::HeMu | PpduFormat::HeErSu | PpduFormat::HeTb)
 }
 
-/// Compact CSI data-format descriptor.
-///
-/// Mirror of `esp_csi_rs::csi::RxCSIFmt` — **variant order is the wire encoding**
-/// (postcard encodes the discriminant as a varint of the declaration index), so
-/// do not reorder.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RxCsiFmt {
-    Bw20,
-    HtBw20,
-    HtBw20Stbc,
-    SecbBw20,
-    SecbHtBw20,
-    SecbHtBw20Stbc,
-    SecbHtBw40,
-    SecbHtBw40Stbc,
-    SecaBw20,
-    SecaHtBw20,
-    SecaHtBw20Stbc,
-    SecaHtBw40,
-    SecaHtBw40Stbc,
-    /// VHT 20 MHz (`cur_bb_format == 3` on C5/C6).
-    VhtBw20,
-    /// Any format the core library does not name (discriminant 14). Higher
-    /// numeric `cur_bb_format` values decode here with the raw value preserved
-    /// in the `cur_bb_format` column; a [`crate::profile::ClientProfile`] can
-    /// relabel them for the export.
-    Undefined,
-}
-
-impl RxCsiFmt {
-    /// Stable identifier for the Parquet `data_format` column.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Bw20 => "Bw20",
-            Self::HtBw20 => "HtBw20",
-            Self::HtBw20Stbc => "HtBw20Stbc",
-            Self::SecbBw20 => "SecbBw20",
-            Self::SecbHtBw20 => "SecbHtBw20",
-            Self::SecbHtBw20Stbc => "SecbHtBw20Stbc",
-            Self::SecbHtBw40 => "SecbHtBw40",
-            Self::SecbHtBw40Stbc => "SecbHtBw40Stbc",
-            Self::SecaBw20 => "SecaBw20",
-            Self::SecaHtBw20 => "SecaHtBw20",
-            Self::SecaHtBw20Stbc => "SecaHtBw20Stbc",
-            Self::SecaHtBw40 => "SecaHtBw40",
-            Self::SecaHtBw40Stbc => "SecaHtBw40Stbc",
-            Self::VhtBw20 => "VhtBw20",
-            Self::Undefined => "Undefined",
-        }
-    }
-}
-
-/// esp32 / esp32c3 / esp32s3 layout — mirror of `CSIDataPacket`
-/// (`#[cfg(not(any(esp32c5, esp32c6)))]`). Field order is the wire order.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PacketA {
-    pub mac: [u8; 6],
-    pub rssi: i32,
-    pub timestamp: u32,
-    pub rate: u32,
-    pub sgi: u32,
-    pub secondary_channel: u32,
-    pub channel: u32,
-    pub bandwidth: u32,
-    pub antenna: u32,
-    pub sig_mode: u32,
-    pub mcs: u32,
-    pub smoothing: u32,
-    pub not_sounding: u32,
-    pub aggregation: u32,
-    pub stbc: u32,
-    pub fec_coding: u32,
-    pub ampdu_cnt: u32,
-    pub noise_floor: i32,
-    pub rx_state: u32,
-    pub sig_len: u32,
-    pub date_time: Option<DateTime>,
-    pub sequence_number: u16,
-    pub data_format: RxCsiFmt,
-    pub csi_data_len: u16,
-    pub csi_data: Vec<i8>,
-}
-
-/// esp32c5 layout — mirror of the `#[cfg(any(esp32c5, esp32c6))]` `CSIDataPacket`
-/// **without** the `#[cfg(feature = "esp32c6")]` fields. Field order is the wire
-/// order.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PacketBc5 {
-    pub mac: [u8; 6],
-    pub rssi: i32,
-    pub timestamp: u32,
-    pub rate: u32,
-    pub noise_floor: i32,
-    pub sig_len: u32,
-    pub rx_state: u32,
-    pub dump_len: u32,
-    pub cur_bb_format: u32,
-    pub rx_channel_estimate_info_vld: u32,
-    pub rx_channel_estimate_len: u32,
-    pub second: u32,
-    pub channel: u32,
-    pub is_group: u32,
-    pub rxend_state: u32,
-    pub rxmatch3: u32,
-    pub rxmatch2: u32,
-    pub rxmatch1: u32,
-    pub date_time: Option<DateTime>,
-    pub sequence_number: u16,
-    pub csi_data_len: u16,
-    pub data_format: RxCsiFmt,
-    pub csi_data: Vec<i8>,
-}
-
-/// esp32c6 layout — the c5 layout plus the three `#[cfg(feature = "esp32c6")]`
-/// fields (`sigb_len`, `cur_single_mpdu`, `rxmatch0`) at their declared
-/// positions. Field order is the wire order.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PacketBc6 {
-    pub mac: [u8; 6],
-    pub rssi: i32,
-    pub timestamp: u32,
-    pub rate: u32,
-    pub noise_floor: i32,
-    pub sig_len: u32,
-    pub rx_state: u32,
-    pub dump_len: u32,
-    pub sigb_len: u32,
-    pub cur_single_mpdu: u32,
-    pub cur_bb_format: u32,
-    pub rx_channel_estimate_info_vld: u32,
-    pub rx_channel_estimate_len: u32,
-    pub second: u32,
-    pub channel: u32,
-    pub is_group: u32,
-    pub rxend_state: u32,
-    pub rxmatch3: u32,
-    pub rxmatch2: u32,
-    pub rxmatch1: u32,
-    pub rxmatch0: u32,
-    pub date_time: Option<DateTime>,
-    pub sequence_number: u16,
-    pub csi_data_len: u16,
-    pub data_format: RxCsiFmt,
-    pub csi_data: Vec<i8>,
-}
-
-/// Chip-agnostic decoded CSI record — the superset of every layout's fields.
-///
-/// Fields absent on the source chip are `None`. This is what the Parquet sink
-/// consumes; its column set is the union of all chip layouts plus the
-/// host-supplied receive time.
+/// What one frame decoded to.
 #[derive(Debug, Clone)]
-pub struct DecodedCsi {
-    // ── Common to every layout ──────────────────────────────────────────
-    pub mac: [u8; 6],
-    pub rssi: i32,
-    pub timestamp: u32,
-    pub rate: u32,
-    pub noise_floor: i32,
-    pub sig_len: u32,
-    pub rx_state: u32,
-    pub channel: u32,
-    pub date_time: Option<DateTime>,
-    pub sequence_number: u16,
-    pub data_format: RxCsiFmt,
-    pub csi_data_len: u16,
-    pub csi_data: Vec<i8>,
-
-    // ── esp32-family only ───────────────────────────────────────────────
-    pub sgi: Option<u32>,
-    pub secondary_channel: Option<u32>,
-    pub bandwidth: Option<u32>,
-    pub antenna: Option<u32>,
-    pub sig_mode: Option<u32>,
-    pub mcs: Option<u32>,
-    pub smoothing: Option<u32>,
-    pub not_sounding: Option<u32>,
-    pub aggregation: Option<u32>,
-    pub stbc: Option<u32>,
-    pub fec_coding: Option<u32>,
-    pub ampdu_cnt: Option<u32>,
-
-    // ── c5 / c6 only ────────────────────────────────────────────────────
-    pub dump_len: Option<u32>,
-    pub cur_bb_format: Option<u32>,
-    pub rx_channel_estimate_info_vld: Option<u32>,
-    pub rx_channel_estimate_len: Option<u32>,
-    pub second: Option<u32>,
-    pub is_group: Option<u32>,
-    pub rxend_state: Option<u32>,
-    pub rxmatch3: Option<u32>,
-    pub rxmatch2: Option<u32>,
-    pub rxmatch1: Option<u32>,
-
-    // ── c6 only ─────────────────────────────────────────────────────────
-    pub sigb_len: Option<u32>,
-    pub cur_single_mpdu: Option<u32>,
-    pub rxmatch0: Option<u32>,
+pub enum Decoded {
+    /// A measurement.
+    Csi(Box<CsiRecord>),
+    /// A session announcement (wire format only).
+    Session(Envelope, SessionInfo),
 }
 
-impl From<PacketA> for DecodedCsi {
-    fn from(p: PacketA) -> Self {
-        DecodedCsi {
-            mac: p.mac,
-            rssi: p.rssi,
-            timestamp: p.timestamp,
-            rate: p.rate,
-            noise_floor: p.noise_floor,
-            sig_len: p.sig_len,
-            rx_state: p.rx_state,
-            channel: p.channel,
-            date_time: p.date_time,
-            sequence_number: p.sequence_number,
-            data_format: p.data_format,
-            csi_data_len: p.csi_data_len,
-            csi_data: p.csi_data,
-            sgi: Some(p.sgi),
-            secondary_channel: Some(p.secondary_channel),
-            bandwidth: Some(p.bandwidth),
-            antenna: Some(p.antenna),
-            sig_mode: Some(p.sig_mode),
-            mcs: Some(p.mcs),
-            smoothing: Some(p.smoothing),
-            not_sounding: Some(p.not_sounding),
-            aggregation: Some(p.aggregation),
-            stbc: Some(p.stbc),
-            fec_coding: Some(p.fec_coding),
-            ampdu_cnt: Some(p.ampdu_cnt),
-            dump_len: None,
-            cur_bb_format: None,
-            rx_channel_estimate_info_vld: None,
-            rx_channel_estimate_len: None,
-            second: None,
-            is_group: None,
-            rxend_state: None,
-            rxmatch3: None,
-            rxmatch2: None,
-            rxmatch1: None,
-            sigb_len: None,
-            cur_single_mpdu: None,
-            rxmatch0: None,
-        }
-    }
-}
-
-impl From<PacketBc5> for DecodedCsi {
-    fn from(p: PacketBc5) -> Self {
-        DecodedCsi {
-            mac: p.mac,
-            rssi: p.rssi,
-            timestamp: p.timestamp,
-            rate: p.rate,
-            noise_floor: p.noise_floor,
-            sig_len: p.sig_len,
-            rx_state: p.rx_state,
-            channel: p.channel,
-            date_time: p.date_time,
-            sequence_number: p.sequence_number,
-            data_format: p.data_format,
-            csi_data_len: p.csi_data_len,
-            csi_data: p.csi_data,
-            sgi: None,
-            secondary_channel: None,
-            bandwidth: None,
-            antenna: None,
-            sig_mode: None,
-            mcs: None,
-            smoothing: None,
-            not_sounding: None,
-            aggregation: None,
-            stbc: None,
-            fec_coding: None,
-            ampdu_cnt: None,
-            dump_len: Some(p.dump_len),
-            cur_bb_format: Some(p.cur_bb_format),
-            rx_channel_estimate_info_vld: Some(p.rx_channel_estimate_info_vld),
-            rx_channel_estimate_len: Some(p.rx_channel_estimate_len),
-            second: Some(p.second),
-            is_group: Some(p.is_group),
-            rxend_state: Some(p.rxend_state),
-            rxmatch3: Some(p.rxmatch3),
-            rxmatch2: Some(p.rxmatch2),
-            rxmatch1: Some(p.rxmatch1),
-            sigb_len: None,
-            cur_single_mpdu: None,
-            rxmatch0: None,
-        }
-    }
-}
-
-impl From<PacketBc6> for DecodedCsi {
-    fn from(p: PacketBc6) -> Self {
-        DecodedCsi {
-            mac: p.mac,
-            rssi: p.rssi,
-            timestamp: p.timestamp,
-            rate: p.rate,
-            noise_floor: p.noise_floor,
-            sig_len: p.sig_len,
-            rx_state: p.rx_state,
-            channel: p.channel,
-            date_time: p.date_time,
-            sequence_number: p.sequence_number,
-            data_format: p.data_format,
-            csi_data_len: p.csi_data_len,
-            csi_data: p.csi_data,
-            sgi: None,
-            secondary_channel: None,
-            bandwidth: None,
-            antenna: None,
-            sig_mode: None,
-            mcs: None,
-            smoothing: None,
-            not_sounding: None,
-            aggregation: None,
-            stbc: None,
-            fec_coding: None,
-            ampdu_cnt: None,
-            dump_len: Some(p.dump_len),
-            cur_bb_format: Some(p.cur_bb_format),
-            rx_channel_estimate_info_vld: Some(p.rx_channel_estimate_info_vld),
-            rx_channel_estimate_len: Some(p.rx_channel_estimate_len),
-            second: Some(p.second),
-            is_group: Some(p.is_group),
-            rxend_state: Some(p.rxend_state),
-            rxmatch3: Some(p.rxmatch3),
-            rxmatch2: Some(p.rxmatch2),
-            rxmatch1: Some(p.rxmatch1),
-            sigb_len: Some(p.sigb_len),
-            cur_single_mpdu: Some(p.cur_single_mpdu),
-            rxmatch0: Some(p.rxmatch0),
-        }
-    }
-}
-
-/// Failure decoding a serialized CSI frame.
+/// Failure decoding a serialized frame.
 #[derive(Debug)]
-pub struct DecodeError(postcard::Error);
+pub enum DecodeError {
+    /// The frame is not a valid wire frame (and no legacy fallback applied).
+    Wire(wire::DecodeError),
+    /// The stream is in the legacy format and this frame did not decode.
+    Legacy(postcard::Error),
+}
 
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "failed to decode CSI frame: {}", self.0)
+        match self {
+            Self::Wire(wire::DecodeError::UnsupportedVersion(v)) => write!(
+                f,
+                "unsupported wire version {v} (this client decodes version {})",
+                wire::WIRE_VERSION
+            ),
+            Self::Wire(wire::DecodeError::Malformed(e)) => {
+                write!(f, "failed to decode CSI frame: {e}")
+            }
+            Self::Legacy(e) => write!(f, "failed to decode legacy CSI frame: {e}"),
+        }
     }
 }
 
 impl std::error::Error for DecodeError {}
 
-impl From<postcard::Error> for DecodeError {
-    fn from(e: postcard::Error) -> Self {
-        DecodeError(e)
+/// Decodes one device's frames, remembering the stream's format and its session announcements.
+#[derive(Debug, Default)]
+pub struct FrameDecoder {
+    legacy_chip: Option<Chip>,
+    format: Option<StreamFormat>,
+    /// Session announcements by `(node_id, session_id)`.
+    sessions: HashMap<([u8; 6], u32), SessionInfo>,
+}
+
+impl FrameDecoder {
+    /// A decoder for one device's stream. `legacy_chip` enables the pre-0.12 fallback, whose layout
+    /// depends on the chip; with `None` only wire frames decode.
+    pub fn new(legacy_chip: Option<Chip>) -> Self {
+        Self {
+            legacy_chip,
+            ..Self::default()
+        }
+    }
+
+    /// The format the stream turned out to use, once a frame has decoded.
+    pub fn format(&self) -> Option<StreamFormat> {
+        self.format
+    }
+
+    /// Decode one WebSocket frame (a COBS frame, with or without its trailing `\0`).
+    pub fn decode(&mut self, frame: &[u8]) -> Result<Decoded, DecodeError> {
+        match self.format {
+            Some(StreamFormat::Wire) => self.decode_wire(frame).map_err(DecodeError::Wire),
+            Some(StreamFormat::Legacy) => self.decode_legacy(frame),
+            None => match self.decode_wire(frame) {
+                Ok(d) => {
+                    self.format = Some(StreamFormat::Wire);
+                    Ok(d)
+                }
+                Err(wire_err) => {
+                    if self.legacy_chip.is_none() {
+                        return Err(DecodeError::Wire(wire_err));
+                    }
+                    let d = self.decode_legacy(frame).map_err(|_| DecodeError::Wire(wire_err))?;
+                    self.format = Some(StreamFormat::Legacy);
+                    Ok(d)
+                }
+            },
+        }
+    }
+
+    fn decode_wire(&mut self, frame: &[u8]) -> Result<Decoded, wire::DecodeError> {
+        let mut owned = frame.to_vec();
+        let (envelope, body) = wire::decode_cobs(&mut owned)?;
+        match body {
+            Body::Session(info) => {
+                self.sessions.insert((envelope.node_id, envelope.session_id), info);
+                Ok(Decoded::Session(envelope, info))
+            }
+            Body::Csi(frame) => {
+                let session = self.sessions.get(&(envelope.node_id, envelope.session_id));
+                let chip = match &frame.payload {
+                    CsiPayload::EspRaw { chip, .. } => Some(*chip),
+                    _ => session.map(|s| s.chip),
+                };
+                let device_time_unix_us = session.and_then(|s| wall_time(s, &frame.meta));
+                Ok(Decoded::Csi(Box::new(CsiRecord {
+                    format: StreamFormat::Wire,
+                    envelope: Some(envelope),
+                    frame,
+                    chip,
+                    device_time_unix_us,
+                    legacy_format: None,
+                })))
+            }
+        }
+    }
+
+    fn decode_legacy(&self, frame: &[u8]) -> Result<Decoded, DecodeError> {
+        let Some(chip) = self.legacy_chip else {
+            return Err(DecodeError::Legacy(postcard::Error::DeserializeBadEncoding));
+        };
+        let decoded = legacy::decode(frame, chip).map_err(DecodeError::Legacy)?;
+        Ok(Decoded::Csi(Box::new(CsiRecord {
+            format: StreamFormat::Legacy,
+            envelope: None,
+            frame: decoded.frame,
+            chip: Some(chip),
+            device_time_unix_us: None,
+            legacy_format: Some(decoded.data_format),
+        })))
     }
 }
 
-/// Decode one COBS-framed postcard CSI frame into a [`DecodedCsi`].
-///
-/// `frame` is the WebSocket payload (the COBS body without the trailing `\0`
-/// terminator the server strips). `take_from_bytes_cobs` decodes in place and
-/// tolerates trailing pad bytes after the encoded struct. The input is copied
-/// because COBS decoding mutates the buffer.
-pub fn decode(frame: &[u8], chip: ChipVariant) -> Result<DecodedCsi, DecodeError> {
-    let mut owned = frame.to_vec();
-    let decoded = match chip {
-        ChipVariant::Esp32Family => {
-            let (p, _) = postcard::take_from_bytes_cobs::<PacketA>(&mut owned)?;
-            p.into()
-        }
-        ChipVariant::Esp32c5 => {
-            let (p, _) = postcard::take_from_bytes_cobs::<PacketBc5>(&mut owned)?;
-            p.into()
-        }
-        ChipVariant::Esp32c6 => {
-            let (p, _) = postcard::take_from_bytes_cobs::<PacketBc6>(&mut owned)?;
-            p.into()
-        }
-    };
-    Ok(decoded)
+/// `meta`'s receive time on the wall clock, from the session's anchor.
+fn wall_time(session: &SessionInfo, meta: &RxMeta) -> Option<i64> {
+    let epoch = i128::from(session.epoch_unix_us?);
+    let t = epoch + i128::from(meta.timestamp_us) - i128::from(session.timestamp_us);
+    i64::try_from(t).ok()
+}
+
+/// Stable name of a [`SourceKind`] for the export.
+pub fn source_name(s: SourceKind) -> &'static str {
+    match s {
+        SourceKind::EspVendor => "esp_vendor",
+        SourceKind::Ieee80211bf => "ieee80211bf",
+        SourceKind::Synthetic => "synthetic",
+    }
+}
+
+/// Stable name of a [`PpduFormat`] for the export.
+pub fn ppdu_name(p: PpduFormat) -> &'static str {
+    match p {
+        PpduFormat::Unknown => "unknown",
+        PpduFormat::Dsss => "dsss",
+        PpduFormat::NonHt => "non_ht",
+        PpduFormat::Ht => "ht",
+        PpduFormat::Vht => "vht",
+        PpduFormat::VhtMu => "vht_mu",
+        PpduFormat::HeSu => "he_su",
+        PpduFormat::HeMu => "he_mu",
+        PpduFormat::HeErSu => "he_er_su",
+        PpduFormat::HeTb => "he_tb",
+        PpduFormat::Eht => "eht",
+    }
+}
+
+/// Stable name of a [`wire::Secondary`] for the export.
+pub fn secondary_name(s: wire::Secondary) -> &'static str {
+    match s {
+        wire::Secondary::None => "none",
+        wire::Secondary::Above => "above",
+        wire::Secondary::Below => "below",
+    }
+}
+
+/// The 0.11 numeric secondary-channel code (0 none, 1 above, 2 below).
+pub fn secondary_code(s: wire::Secondary) -> u32 {
+    match s {
+        wire::Secondary::None => 0,
+        wire::Secondary::Above => 1,
+        wire::Secondary::Below => 2,
+    }
+}
+
+/// Stable name of a [`Stimulus`] kind for the export.
+pub fn stimulus_name(s: &Stimulus) -> &'static str {
+    match s {
+        Stimulus::Controlled { .. } => "controlled",
+        Stimulus::Ambient { .. } => "ambient",
+        Stimulus::Observed { .. } => "observed",
+    }
+}
+
+/// Stable name of a [`CsiPayload`] kind for the export.
+pub fn payload_name(p: &CsiPayload) -> &'static str {
+    match p {
+        CsiPayload::EspRaw { .. } => "esp_raw",
+        CsiPayload::Grouped { .. } => "grouped",
+        CsiPayload::Variation { .. } => "variation",
+    }
+}
+
+/// Firmware `chip=` string of a [`Chip`].
+pub fn chip_name(c: Chip) -> &'static str {
+    match c {
+        Chip::Esp32 => "esp32",
+        Chip::Esp32S2 => "esp32s2",
+        Chip::Esp32S3 => "esp32s3",
+        Chip::Esp32C3 => "esp32c3",
+        Chip::Esp32C5 => "esp32c5",
+        Chip::Esp32C6 => "esp32c6",
+    }
+}
+
+/// The header digest's Retry bit, when a digest is present.
+pub fn header_retry(h: &Option<HeaderDigest>) -> Option<bool> {
+    h.as_ref().map(HeaderDigest::is_retry)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::wire::{Bandwidth, Secondary};
+    use heapless::Vec as HVec;
 
-    /// Round-trip a `PacketA` through postcard+COBS exactly as the firmware
-    /// emits it (`to_slice_cobs`), then decode it back. Guards against wire
-    /// drift in field order/types for the esp32-family layout.
-    #[test]
-    fn decode_packet_a_roundtrip() {
-        let pkt = PacketA {
-            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
-            rssi: -42,
-            timestamp: 123_456,
-            rate: 11,
-            sgi: 1,
-            secondary_channel: 0,
-            channel: 6,
-            bandwidth: 0,
-            antenna: 0,
-            sig_mode: 1,
-            mcs: 7,
-            smoothing: 0,
-            not_sounding: 1,
-            aggregation: 0,
-            stbc: 0,
-            fec_coding: 0,
-            ampdu_cnt: 0,
-            noise_floor: -96,
-            rx_state: 0,
-            sig_len: 128,
-            date_time: Some(DateTime {
-                year: 2026,
-                month: 6,
-                day: 22,
-                hour: 12,
-                minute: 30,
-                second: 15,
-                millisecond: 250,
-            }),
-            sequence_number: 4242,
-            data_format: RxCsiFmt::HtBw20,
-            csi_data_len: 4,
-            csi_data: vec![1, -2, 3, -4],
-        };
-
-        // Mirror the firmware: postcard-serialize then COBS-frame, then strip
-        // the trailing `\0` the server removes before broadcasting.
-        let mut buf = vec![0u8; 1024];
-        let cobs = postcard::to_slice_cobs(&pkt, &mut buf).unwrap();
-        let body = cobs.strip_suffix(&[0]).unwrap_or(cobs);
-
-        let out = decode(body, ChipVariant::Esp32Family).unwrap();
-        assert_eq!(out.mac, pkt.mac);
-        assert_eq!(out.rssi, -42);
-        assert_eq!(out.channel, 6);
-        assert_eq!(out.mcs, Some(7));
-        assert_eq!(out.noise_floor, -96);
-        assert_eq!(out.sequence_number, 4242);
-        assert_eq!(out.data_format, RxCsiFmt::HtBw20);
-        assert_eq!(out.csi_data, vec![1, -2, 3, -4]);
-        assert_eq!(out.dump_len, None);
-        let dt = out.date_time.expect("date_time present");
-        assert_eq!((dt.year, dt.month, dt.day), (2026, 6, 22));
-    }
-
-    #[test]
-    fn decode_packet_bc6_roundtrip() {
-        let pkt = PacketBc6 {
-            mac: [1, 2, 3, 4, 5, 6],
-            rssi: -55,
-            timestamp: 9,
-            rate: 1,
-            noise_floor: -90,
-            sig_len: 64,
-            rx_state: 0,
-            dump_len: 100,
-            sigb_len: 7,
-            cur_single_mpdu: 1,
-            cur_bb_format: 2,
-            rx_channel_estimate_info_vld: 1,
-            rx_channel_estimate_len: 64,
-            second: 3,
-            channel: 11,
-            is_group: 0,
-            rxend_state: 0,
-            rxmatch3: 0,
-            rxmatch2: 0,
-            rxmatch1: 1,
-            rxmatch0: 1,
-            date_time: None,
-            sequence_number: 7,
-            csi_data_len: 2,
-            data_format: RxCsiFmt::Undefined,
-            csi_data: vec![-1, 1],
-        };
-        let mut buf = vec![0u8; 1024];
-        let cobs = postcard::to_slice_cobs(&pkt, &mut buf).unwrap();
-        let body = cobs.strip_suffix(&[0]).unwrap_or(cobs);
-
-        let out = decode(body, ChipVariant::Esp32c6).unwrap();
-        assert_eq!(out.mac, [1, 2, 3, 4, 5, 6]);
-        assert_eq!(out.sigb_len, Some(7));
-        assert_eq!(out.rxmatch0, Some(1));
-        assert_eq!(out.sgi, None);
-        assert_eq!(out.csi_data, vec![-1, 1]);
-        assert!(out.date_time.is_none());
-    }
-
-    /// Wire-compat regression: a frame the firmware tags `Undefined` (the
-    /// discriminant is now 14 after the higher-format variants were dropped)
-    /// carrying a numeric `cur_bb_format` beyond the named set decodes cleanly,
-    /// with the raw `cur_bb_format` preserved for a profile to relabel.
-    #[test]
-    fn undefined_format_preserves_numeric_cur_bb_format() {
-        let pkt = PacketBc5 {
-            mac: [1, 2, 3, 4, 5, 6],
-            rssi: -50,
-            timestamp: 1,
-            rate: 1,
-            noise_floor: -90,
-            sig_len: 64,
-            rx_state: 0,
-            dump_len: 100,
-            cur_bb_format: 4,
-            rx_channel_estimate_info_vld: 1,
-            rx_channel_estimate_len: 64,
-            second: 0,
+    fn meta() -> RxMeta {
+        RxMeta {
+            timestamp_us: 5_000_000_123,
+            rssi: -40,
+            noise_floor: -92,
             channel: 36,
-            is_group: 0,
-            rxend_state: 0,
-            rxmatch3: 0,
-            rxmatch2: 0,
-            rxmatch1: 0,
-            date_time: None,
-            sequence_number: 1,
-            csi_data_len: 2,
-            data_format: RxCsiFmt::Undefined,
-            csi_data: vec![1, -1],
-        };
-        let mut buf = vec![0u8; 1024];
-        let cobs = postcard::to_slice_cobs(&pkt, &mut buf).unwrap();
-        let body = cobs.strip_suffix(&[0]).unwrap_or(cobs);
+            secondary: Secondary::None,
+            bandwidth: Some(Bandwidth::Mhz20),
+            ppdu: PpduFormat::HeSu,
+            mcs: None,
+            stbc: None,
+            sgi: None,
+            n_rx: 1,
+            n_ss: None,
+            antenna: None,
+            sig_len: 120,
+            rx_state: 0,
+            not_sounding: None,
+            aggregation: None,
+            frame_seq: Some(77),
+            vendor: VendorRx::EspHe {
+                rate: 0,
+                cur_bb_format: 4,
+                estimate_valid: true,
+                estimate_len: 490,
+                dump_len: 490,
+                is_group: false,
+                rxend_state: 0,
+                rxmatch: 0b10,
+                he_siga1: 0x1234,
+                he_siga2: 0x56,
+                sigb_len: 0,
+                single_mpdu: false,
+            },
+        }
+    }
 
-        let out = decode(body, ChipVariant::Esp32c5).unwrap();
-        assert_eq!(out.data_format, RxCsiFmt::Undefined);
-        assert_eq!(out.cur_bb_format, Some(4));
+    fn encode(env: &Envelope, body: &Body) -> Vec<u8> {
+        let mut buf = vec![0u8; wire::MAX_ENCODED_LEN];
+        let used = wire::encode_cobs(env, body, &mut buf).unwrap();
+        // The server strips the delimiter.
+        used.strip_suffix(&[0]).unwrap().to_vec()
     }
 
     #[test]
-    fn chip_string_mapping() {
-        assert_eq!(ChipVariant::from_chip_str("ESP32"), Some(ChipVariant::Esp32Family));
-        assert_eq!(ChipVariant::from_chip_str("esp32c6"), Some(ChipVariant::Esp32c6));
-        assert_eq!(ChipVariant::from_chip_str("esp32c5"), Some(ChipVariant::Esp32c5));
-        assert_eq!(ChipVariant::from_chip_str("weird"), None);
+    fn decodes_wire_he20_frame_with_session_anchor() {
+        let node = [0x10, 0x20, 0x30, 0x40, 0x50, 0x60];
+        let mut dec = FrameDecoder::new(Some(Chip::Esp32C5));
+
+        let info = SessionInfo::new(Chip::Esp32C5, [0, 12, 0], 5_000_000_000, Some(1_700_000_000_000_000));
+        let s = encode(&Envelope::new(node, 9, SourceKind::EspVendor, 0), &Body::Session(info));
+        assert!(matches!(dec.decode(&s).unwrap(), Decoded::Session(_, _)));
+        assert_eq!(dec.format(), Some(StreamFormat::Wire));
+
+        let bytes: HVec<i8, { wire::MAX_CSI_BYTES }> = (0..490).map(|i| (i % 100) as i8).collect();
+        let frame = CsiFrame::new(
+            meta(),
+            Stimulus::Controlled { setup_id: 3, instance_id: 41, ta: [2, 0, 0, 0, 0, 1] },
+            None,
+            CsiPayload::EspRaw { chip: Chip::Esp32C5, layout: LayoutId::C5He20Su, first_word_invalid: false, bytes },
+        );
+        let f = encode(&Envelope::new(node, 9, SourceKind::EspVendor, 1), &Body::Csi(frame));
+        let Decoded::Csi(rec) = dec.decode(&f).unwrap() else { panic!("expected csi") };
+        assert_eq!(rec.cur_bb_format(), Some(4));
+        assert_eq!(rec.csi_data().len(), 490);
+        assert_eq!(rec.device_time_unix_us, Some(1_700_000_000_000_123));
+        let idx = rec.subcarrier_indices().unwrap();
+        assert_eq!(idx.len(), 245);
+        assert_eq!((idx[0], idx[122], idx[123], idx[244]), (0, 122, -122, -1));
+        let hz = rec.subcarrier_freqs_hz().unwrap();
+        assert_eq!(hz[1], 78_125);
+        assert_eq!(rec.frame.transmitter(), Some([2, 0, 0, 0, 0, 1]));
+    }
+
+    #[test]
+    fn grouped_indices_follow_start_and_grouping() {
+        let frame = CsiFrame::new(
+            meta(),
+            Stimulus::Ambient { ta: [0; 6] },
+            None,
+            CsiPayload::Grouped { ng: 4, nb: 8, sc_start: -122, n_sc: 3, n_rx: 1, n_tx: 1, data: HVec::from_slice(&[1, 2, 3]).unwrap() },
+        );
+        let f = encode(&Envelope::new([0; 6], 1, SourceKind::Synthetic, 0), &Body::Csi(frame));
+        let Decoded::Csi(rec) = FrameDecoder::new(None).decode(&f).unwrap() else { panic!() };
+        assert_eq!(rec.subcarrier_indices().unwrap(), vec![-122, -118, -114]);
+        assert_eq!(rec.subcarrier_freqs_hz().unwrap()[1], -118 * 78_125);
+        assert_eq!(rec.grouped().unwrap().data, vec![1, 2, 3]);
+        assert!(rec.csi_data().is_empty());
+    }
+
+    #[test]
+    fn rejects_other_wire_version_without_legacy_chip() {
+        let mut env = Envelope::new([0; 6], 1, SourceKind::EspVendor, 0);
+        env.version = wire::WIRE_VERSION + 1;
+        let info = SessionInfo::new(Chip::Esp32, [0, 13, 0], 0, None);
+        let f = encode(&env, &Body::Session(info));
+        let err = FrameDecoder::new(None).decode(&f).unwrap_err();
+        assert!(matches!(err, DecodeError::Wire(wire::DecodeError::UnsupportedVersion(2))));
     }
 }
