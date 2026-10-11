@@ -4,7 +4,7 @@ use crate::export::Recorder;
 use crate::profile::{ClientProfile, StandardClientProfile};
 use crate::state::{
     AppState, ConfigSnapshotFile, ControlStatus, DeviceAction, DeviceConfig, DeviceForms,
-    DeviceInfo, DeviceListEntry, DeviceState, PairingPreset, ServerStatus, Tab, TrafficForm,
+    DeviceInfo, DeviceListEntry, DeviceState, MeasurementForm, PairingPreset, ServerStatus, Tab,
     UserIntent, WiFiForm, WiFiMode, WifiProtocol,
 };
 use crate::ui;
@@ -146,14 +146,14 @@ impl CsiClientApp {
                 self.submit_device_post(&id, "reset_config", "config/reset", None)
             }
             DeviceAction::SetWifi(wifi) => self.submit_set_wifi(&id, wifi),
-            DeviceAction::SetTraffic(traffic) => {
-                if let Some(frequency_hz) = parse_required_u64(&traffic.frequency_hz) {
+            DeviceAction::SetMeasurement(measurement) => {
+                if let Some(periodicity_hz) = parse_required_u64(&measurement.periodicity_hz) {
                     // Send `unsolicited` only for the WiFi infra modes AND
                     // firmware ≥ 0.7.0: the flag is meaningless elsewhere,
-                    // and older firmware's CLI rejects the whole set-traffic
+                    // and older firmware's CLI rejects the whole measurement
                     // command on an unknown flag — silently discarding the
-                    // frequency too. The stored form is kept in sync by
-                    // SetWifi/SetTraffic dispatch, so the mode is current
+                    // periodicity too. The stored form is kept in sync by
+                    // SetWifi/SetMeasurement dispatch, so the mode is current
                     // even mid-pairing-preset.
                     let send_unsolicited = self
                         .state
@@ -165,16 +165,21 @@ impl CsiClientApp {
                                 && d.supports_unsolicited()
                         });
                     let body = if send_unsolicited {
-                        json!({ "frequency_hz": frequency_hz, "unsolicited": traffic.unsolicited })
+                        json!({ "periodicity_hz": periodicity_hz, "unsolicited": measurement.unsolicited })
                     } else {
-                        json!({ "frequency_hz": frequency_hz })
+                        json!({ "periodicity_hz": periodicity_hz })
                     };
                     if let Some(device) = self.state.device_mut_by_id(&id) {
-                        device.forms.traffic = traffic.clone();
+                        device.forms.measurement = measurement.clone();
                     }
-                    self.submit_device_post(&id, "set_traffic", "config/traffic", Some(body));
+                    self.submit_device_post(
+                        &id,
+                        "set_measurement",
+                        "config/measurement",
+                        Some(body),
+                    );
                 } else {
-                    self.set_error("Traffic frequency must be a non-negative integer");
+                    self.set_error("Periodicity must be a non-negative integer (Hz)");
                 }
             }
             DeviceAction::SetCsi(csi) => {
@@ -591,7 +596,7 @@ impl CsiClientApp {
 
         // Keep the stored form in sync with what was submitted — a no-op for
         // UI-driven edits (the form was the source), but required for the
-        // pairing-preset queue, whose later SetTraffic step consults
+        // pairing-preset queue, whose later SetMeasurement step consults
         // forms.wifi.mode before the async config re-fetch lands.
         if let Some(device) = self.state.device_mut_by_id(id) {
             device.forms.wifi = wifi.clone();
@@ -628,7 +633,7 @@ impl CsiClientApp {
         let ch = channel.to_string();
         let ap_ssid = "esp-csi-ap".to_owned();
 
-        let (wifi_a, wifi_b, proto_a, proto_b, traffic_a, traffic_b) = match preset {
+        let (wifi_a, wifi_b, proto_a, proto_b, measurement_a, measurement_b) = match preset {
             PairingPreset::SoftApLab => (
                 WiFiForm {
                     mode: WiFiMode::WifiAp,
@@ -648,12 +653,12 @@ impl CsiClientApp {
                 // 1000 Hz; the station is receive-only (0 = flood TX task
                 // off). Both boards flooding at once contend for airtime and
                 // collapse the delivered CSI rate.
-                Some(TrafficForm {
-                    frequency_hz: "1000".to_owned(),
+                Some(MeasurementForm {
+                    periodicity_hz: "1000".to_owned(),
                     unsolicited: true,
                 }),
-                Some(TrafficForm {
-                    frequency_hz: "0".to_owned(),
+                Some(MeasurementForm {
+                    periodicity_hz: "0".to_owned(),
                     unsolicited: false,
                 }),
             ),
@@ -661,7 +666,7 @@ impl CsiClientApp {
             // (TX only, no association, captures nothing), device 2 locks the
             // same channel promiscuously and measures every frame overheard.
             // The emitter forces its own TX PHY and generates its own frames,
-            // so neither board takes a protocol or traffic step.
+            // so neither board takes a protocol or measurement step.
             PairingPreset::Ht20EmitterSniffer => (
                 WiFiForm {
                     mode: WiFiMode::Ht20Emitter,
@@ -698,12 +703,12 @@ impl CsiClientApp {
             // SSID; both ends only have to agree on the channel.
             PairingPreset::EspNowPair => (
                 WiFiForm {
-                    mode: WiFiMode::EspNowCentral,
+                    mode: WiFiMode::EspNowInitiator,
                     channel: ch.clone(),
                     ..WiFiForm::default()
                 },
                 WiFiForm {
-                    mode: WiFiMode::EspNowPeripheral,
+                    mode: WiFiMode::EspNowResponder,
                     channel: ch,
                     ..WiFiForm::default()
                 },
@@ -736,31 +741,19 @@ impl CsiClientApp {
                            id: &str,
                            wifi: WiFiForm,
                            protocol: Option<WifiProtocol>,
-                           traffic: Option<TrafficForm>| {
+                           measurement: Option<MeasurementForm>| {
             queue.push((id.to_owned(), DeviceAction::ResetConfig));
             queue.push((id.to_owned(), DeviceAction::SetWifi(wifi)));
             if let Some(p) = protocol {
                 queue.push((id.to_owned(), DeviceAction::SetProtocol(p)));
             }
-            if let Some(t) = traffic {
-                queue.push((id.to_owned(), DeviceAction::SetTraffic(t)));
+            if let Some(t) = measurement {
+                queue.push((id.to_owned(), DeviceAction::SetMeasurement(t)));
             }
         };
 
-        push_device(
-            &mut queue,
-            &device_ids[0],
-            wifi_a,
-            proto_a,
-            traffic_a,
-        );
-        push_device(
-            &mut queue,
-            &device_ids[1],
-            wifi_b,
-            proto_b,
-            traffic_b,
-        );
+        push_device(&mut queue, &device_ids[0], wifi_a, proto_a, measurement_a);
+        push_device(&mut queue, &device_ids[1], wifi_b, proto_b, measurement_b);
 
         self.state.push_event(format!(
             "Applying preset '{}' to {} and {}",
@@ -950,8 +943,8 @@ impl CsiClientApp {
                     }
                     // Any successful config-mutating POST repopulates a slot in the
                     // server cache, so re-pull `config` to keep the form in sync.
-                    "reset_config" | "set_wifi" | "set_traffic" | "set_csi" | "set_csi_preset"
-                    | "set_csi_output" | "set_output_mode" | "set_protocol"
+                    "reset_config" | "set_wifi" | "set_measurement" | "set_csi"
+                    | "set_csi_preset" | "set_csi_output" | "set_output_mode" | "set_protocol"
                     | "set_rate" | "set_io_tasks" | "set_csi_delivery" => {
                         followups.push(UserIntent::Device {
                             id: id.clone(),
@@ -1280,13 +1273,13 @@ fn parse_envelope<T: serde::de::DeserializeOwned>(data: serde_json::Value) -> Op
 
 /// Ordered per-device steps that push every config section to the device.
 ///
-/// Wi-Fi goes first so the mode is settled before the traffic step consults
+/// Wi-Fi goes first so the mode is settled before the measurement step consults
 /// it for the `unsolicited` gating (same ordering as the pairing presets).
 fn full_config_steps(id: &str, forms: &DeviceForms) -> Vec<(String, DeviceAction)> {
     [
         DeviceAction::SetWifi(forms.wifi.clone()),
         DeviceAction::SetProtocol(forms.protocol),
-        DeviceAction::SetTraffic(forms.traffic.clone()),
+        DeviceAction::SetMeasurement(forms.measurement.clone()),
         DeviceAction::SetCsi(forms.csi.clone()),
         DeviceAction::SetPhyRate(forms.phy_rate.clone()),
         DeviceAction::SetIoTasks(forms.io_tasks.clone()),
@@ -1329,8 +1322,8 @@ fn validate_full_config(device: &DeviceState) -> Result<(), String> {
     if wifi.mode.uses_peer_mac() && !wifi.peer_mac.trim().is_empty() {
         validate_peer_mac(wifi.peer_mac.trim())?;
     }
-    if parse_required_u64(&forms.traffic.frequency_hz).is_none() {
-        return Err("Traffic frequency must be a non-negative integer".to_owned());
+    if parse_required_u64(&forms.measurement.periodicity_hz).is_none() {
+        return Err("Periodicity must be a non-negative integer (Hz)".to_owned());
     }
     if parse_required_u32(&forms.csi.val_scale_cfg).is_none() {
         return Err("val_scale_cfg must be a valid u32 number".to_owned());
@@ -1346,7 +1339,7 @@ fn step_action_label(action: &DeviceAction) -> &str {
     match action {
         DeviceAction::ResetConfig => "reset_config",
         DeviceAction::SetWifi(_) => "set_wifi",
-        DeviceAction::SetTraffic(_) => "set_traffic",
+        DeviceAction::SetMeasurement(_) => "set_measurement",
         DeviceAction::SetProtocol(_) => "set_protocol",
         DeviceAction::SetCsi(_) => "set_csi",
         DeviceAction::SetCsiPreset(_) => "set_csi_preset",
@@ -1496,11 +1489,11 @@ fn wifi_request_body(wifi: &WiFiForm, channel: Option<u16>) -> Result<serde_json
         body["ht40"] = json!(wifi.ht40.as_api_value());
     }
 
-    // The collection mode, only where the mode admits a choice (the server
+    // The reporting, only where the mode admits a choice (the server
     // rejects it for the modes that fix it). Unset = firmware default.
-    if wifi.mode.admits_collection_choice() {
-        if let Some(collection) = wifi.collection {
-            body["collection"] = json!(collection.as_api_value());
+    if wifi.mode.admits_reporting_choice() {
+        if let Some(reporting) = wifi.reporting {
+            body["reporting"] = json!(reporting.as_api_value());
         }
     }
 
@@ -1524,7 +1517,7 @@ fn tab_button(ui: &mut egui::Ui, state: &mut AppState, tab: Tab, label: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{CollectionMode, Ht40Mode};
+    use crate::state::{Ht40Mode, Reporting};
 
     #[test]
     fn full_config_steps_cover_every_section_in_order() {
@@ -1542,7 +1535,7 @@ mod tests {
             vec![
                 "set_wifi",
                 "set_protocol",
-                "set_traffic",
+                "set_measurement",
                 "set_csi",
                 "set_rate",
                 "set_io_tasks",
@@ -1594,7 +1587,7 @@ mod tests {
         app.state.devices.push(DeviceState::new("dev-a"));
 
         let mut forms = DeviceForms::default();
-        forms.traffic.frequency_hz = "fast".to_owned();
+        forms.measurement.periodicity_hz = "fast".to_owned();
         let path = std::env::temp_dir().join("csi_webclient_load_invalid_test.json");
         let snapshot = ConfigSnapshotFile {
             format: 1,
@@ -1612,24 +1605,24 @@ mod tests {
         assert!(app.step_queue.is_empty());
         assert!(!app.state.transient.error_message.is_empty());
         let device = app.state.devices.iter().find(|d| d.id == "dev-a").unwrap();
-        assert_eq!(device.forms.traffic.frequency_hz, "fast");
+        assert_eq!(device.forms.measurement.periodicity_hz, "fast");
     }
 
     #[test]
-    fn wifi_body_sends_collection_only_where_the_mode_admits_it() {
+    fn wifi_body_sends_reporting_only_where_the_mode_admits_it() {
         for mode in [
             WiFiMode::Station,
             WiFiMode::WifiAp,
-            WiFiMode::EspNowCentral,
-            WiFiMode::EspNowPeripheral,
+            WiFiMode::EspNowInitiator,
+            WiFiMode::EspNowResponder,
         ] {
             let wifi = WiFiForm {
                 mode,
-                collection: Some(CollectionMode::Listener),
+                reporting: Some(Reporting::None),
                 ..WiFiForm::default()
             };
             let body = wifi_request_body(&wifi, None).unwrap();
-            assert_eq!(body["collection"], "listener", "{mode:?}");
+            assert_eq!(body["reporting"], "none", "{mode:?}");
         }
         for mode in [
             WiFiMode::Sniffer,
@@ -1640,15 +1633,15 @@ mod tests {
         ] {
             let wifi = WiFiForm {
                 mode,
-                collection: Some(CollectionMode::Listener),
+                reporting: Some(Reporting::None),
                 ..WiFiForm::default()
             };
             let body = wifi_request_body(&wifi, None).unwrap();
-            assert!(body.get("collection").is_none(), "{mode:?}");
+            assert!(body.get("reporting").is_none(), "{mode:?}");
         }
         // Unset is omitted, leaving the firmware default.
         let body = wifi_request_body(&WiFiForm::default(), None).unwrap();
-        assert!(body.get("collection").is_none());
+        assert!(body.get("reporting").is_none());
     }
 
     #[test]
@@ -1664,7 +1657,7 @@ mod tests {
         assert_eq!(body["ht40"], "above");
 
         let wifi = WiFiForm {
-            mode: WiFiMode::EspNowCentral,
+            mode: WiFiMode::EspNowInitiator,
             peer_mac: "zz:zz".to_owned(),
             ..WiFiForm::default()
         };
@@ -1685,7 +1678,7 @@ mod tests {
     #[test]
     fn validate_full_config_rejects_bad_fields() {
         let mut device = DeviceState::new("dev-a");
-        device.forms.traffic.frequency_hz = "fast".to_owned();
+        device.forms.measurement.periodicity_hz = "fast".to_owned();
         assert!(validate_full_config(&device).is_err());
 
         let mut device = DeviceState::new("dev-a");

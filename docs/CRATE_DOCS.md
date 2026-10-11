@@ -28,7 +28,7 @@ view code.
 
 ## API Coverage
 
-The client targets `csi-webserver` **0.3.0+** with `esp-csi-cli-rs` **0.8.0+** on the devices:
+The client targets `csi-webserver` **0.4.0+** with firmware speaking CLI protocol **4** (`esp-csi-cli-rs` **0.10.0+**) on the devices:
 
 - `GET /api/devices`
 - `GET /api/devices/{id}/info`
@@ -36,7 +36,7 @@ The client targets `csi-webserver` **0.3.0+** with `esp-csi-cli-rs` **0.8.0+** o
 - `GET /api/devices/{id}/control/status`
 - `POST /api/devices/{id}/config/reset`
 - `POST /api/devices/{id}/config/wifi`
-- `POST /api/devices/{id}/config/traffic`
+- `POST /api/devices/{id}/config/measurement`
 - `POST /api/devices/{id}/config/csi`
 - `POST /api/devices/{id}/config/csi-output`
 - `POST /api/devices/{id}/config/output-mode`
@@ -56,17 +56,17 @@ For detailed request/response behavior and payload fields, see:
 
 ## Protocol Values Used By The Client
 
-- Wi-Fi modes (each an operational mode): `station`, `sniffer`, `wifi-ap`
-  (requires firmware ≥ 0.7.0), `ht20-emitter`, `ht40-emitter`,
-  `esp-now-central`, `esp-now-peripheral`, `esp-now-simplex-source` and
-  `esp-now-simplex-peer` (sent as the firmware's `esp-now-fast-source` /
-  `esp-now-fast-collector`). A `ClientProfile` may add more; any mode string the
+- Wi-Fi modes: `station`, `sniffer`, `wifi-ap`, `ht20-emitter`, `ht40-emitter`,
+  `esp-now-initiator`, `esp-now-responder`, `esp-now-simplex-source` and
+  `esp-now-simplex-peer`. A `ClientProfile` may add more; any mode string the
   client does not name round-trips verbatim as `WiFiMode::Ext`. The node model
   behind these modes is documented in
   [`esp-csi-rs/docs/network-model.md`](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
-- Collection mode (`collection` in `config/wifi`): `collector` or `listener`.
-  A listener captures but does not report. Sent only for `station`, `wifi-ap`,
-  `esp-now-central` and `esp-now-peripheral`; the other modes fix it.
+- Reporting (`reporting` in `config/wifi`, IEEE 802.11bf): `report` or `none`.
+  `none` measures but reports nothing. Sent only for `station`, `wifi-ap`,
+  `esp-now-initiator` and `esp-now-responder`; the other modes fix it.
+- Measurement (`config/measurement`): `periodicity_hz` (`0` disables generated
+  traffic) and optional `unsolicited`.
 - CSI output (`config/csi-output`): `enabled` boolean, device default `true` —
   whether captured CSI is delivered off-device. Capture runs either way.
 - Output modes: `stream`, `dump`, `both`
@@ -76,7 +76,7 @@ For detailed request/response behavior and payload fields, see:
   ESP-NOW pair, ESP-NOW simplex pair
 - PHY rates: `1m`, `1m-l`, `2m`, `5m5`, `5m5-l`, `11m`, `11m-l`, `6m`, `9m`, `12m`,
   `18m`, `24m`, `36m`, `48m`, `54m`, `mcs0-lgi`..`mcs7-lgi`, `mcs0-sgi`. The rate is
-  reporting only, except on the ESP-NOW pair (`esp-now-central` / `esp-now-peripheral`),
+  recorded only, except on the ESP-NOW pair (`esp-now-initiator` / `esp-now-responder`),
   which applies it.
 
 The server always delivers CSI in **serialized** (COBS+postcard) mode;
@@ -90,7 +90,7 @@ the firmware tokenizer rules: max 32 bytes, no newlines, and not both `'`
 and `"` in the same value. Mode-specific fields are omitted from the JSON
 body when they do not apply (STA fields in station mode only, AP fields in
 `wifi-ap` only, peer MAC in the emitter and ESP-NOW modes, HT40 in `wifi-ap`
-and the ESP-NOW modes, collection mode only where the mode admits a choice).
+and the ESP-NOW modes, reporting only where the mode admits a choice).
 In the emitter modes the peer MAC is the injection destination; in the ESP-NOW
 modes it is the explicit peer, set on both nodes. In `wifi-ap` HT40 runs the
 softAP as HT40; in the ESP-NOW modes it forces the per-peer TX PHY.

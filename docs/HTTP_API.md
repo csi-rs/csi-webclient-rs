@@ -1,8 +1,8 @@
 # HTTP and WebSocket API Reference
 
 This reference documents the endpoints and payloads that `csi-webclient`
-issues against `csi-webserver` **0.3.0+** (with `esp-csi-cli-rs` 0.8.0+ on the
-devices). Behavior, gating rules, and
+issues against `csi-webserver` **0.4.0+** (with firmware on CLI protocol 4,
+`esp-csi-cli-rs` 0.10.0+, on the devices). Behavior, gating rules, and
 validation match the server-side specification.
 
 ## Base Addresses
@@ -109,11 +109,12 @@ since startup or the last `reset-config`. Sub-section objects (`wifi`,
   "wifi": {
     "mode": "sniffer",
     "channel": 6,
-    "sta_ssid": "MyNetwork"
+    "sta_ssid": "MyNetwork",
+    "reporting": "report"
   },
   "collection": {
     "csi_output_enabled": true,
-    "traffic_hz": 100,
+    "periodicity_hz": 100,
     "phy_rate": "mcs0-lgi",
     "protocol": "n",
     "io_tx_enabled": true,
@@ -163,7 +164,7 @@ Notes the client relies on:
 
 ```json
 {
-  "mode": "station | sniffer | wifi-ap | ht20-emitter | ht40-emitter | esp-now-central | esp-now-peripheral | esp-now-fast-source | esp-now-fast-collector",
+  "mode": "station | sniffer | wifi-ap | ht20-emitter | ht40-emitter | esp-now-initiator | esp-now-responder | esp-now-simplex-source | esp-now-simplex-peer",
   "sta_ssid": "string or null",
   "sta_password": "string or null",
   "ap_ssid": "string",
@@ -174,7 +175,7 @@ Notes the client relies on:
   "channel": 6,
   "peer_mac": "string or null",
   "ht40": "none | above | below",
-  "collection": "collector | listener"
+  "reporting": "report | none"
 }
 ```
 
@@ -187,7 +188,7 @@ Client-side validation (mirrors firmware tokenizer rules):
   only in `wifi-ap` mode. The UI clamps the value to the valid range.
 - `ap_burst`: boolean (synchronized burst flood — every flood tick sends one
   frame to every associated station for time-aligned multi-receiver CSI;
-  total airtime = `frequency_hz × leases`); sent only in `wifi-ap` mode.
+  total airtime = `periodicity_hz × leases`); sent only in `wifi-ap` mode.
 - Newlines (`\r`, `\n`) are rejected.
 - Values containing both `'` and `"` are rejected — the firmware
   tokenizer cannot disambiguate them.
@@ -195,31 +196,31 @@ Client-side validation (mirrors firmware tokenizer rules):
   `station` mode it is a pre-association band-selection hint (meaningful on the
   C5's 5 GHz band); leave it blank to inherit the channel from the associated AP.
   For all other modes it is the operating channel.
-- `mode` names the node's **operational mode** — how it reaches the channel. The
-  node model (network role, collection mode, operational mode, session role) is
-  documented in
+- `mode` names the node's **mode** — how it reaches the channel. The mode fixes
+  the node's session role (initiator, responder, or none for an observer) and
+  sensing role, in IEEE 802.11bf terms; the node model is documented in
   [`esp-csi-rs/docs/network-model.md`](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
   `ht20-emitter` / `ht40-emitter` raw-inject HT PPDUs without associating and
-  capture nothing; they build on every chip. The simplex ends are sent as the
-  firmware's `esp-now-fast-source` / `esp-now-fast-collector`; the server also
-  accepts `esp-now-simplex-source` / `esp-now-simplex-peer`. A [`ClientProfile`]
+  capture nothing; they build on every chip. The retired tokens
+  `esp-now-central`, `esp-now-peripheral`, `esp-now-fast-source` and
+  `esp-now-fast-collector` are not accepted (CLI protocol 4). A [`ClientProfile`]
   may add further modes (see "Unknown modes" below).
 - `peer_mac` is sent in the emitter and ESP-NOW modes. In the emitter modes it is
   the destination address of the injected frames, empty meaning broadcast;
-  unicasting to a collector's MAC usually raises that collector's CSI rate. In
+  unicasting to a receiver's MAC usually raises that receiver's CSI rate. In
   the ESP-NOW modes it is the explicit peer, empty meaning automatic pairing;
   when set, configure both nodes, each with the other's address.
 - `ht40` is sent in `wifi-ap` and the ESP-NOW modes. In `wifi-ap` it runs the
   softAP itself as HT40 with the given secondary channel (`none` = HT20); in the
   ESP-NOW modes it forces the per-peer TX PHY to HT40. It never selects emitter
   bandwidth — that is the `ht40-emitter` mode.
-- `collection` is the node's collection mode, forwarded as
-  `set-wifi --collection=<value>`: a `collector` reports the CSI it captures, a
-  `listener` captures but does not report. It is optional, and the client sends it
-  only for `station`, `wifi-ap`, `esp-now-central` and `esp-now-peripheral`, and
+- `reporting` is the node's reporting, forwarded as
+  `set-wifi --reporting=<value>`: `report` sends the CSI the node measures to the
+  host, `none` measures but reports nothing. It is optional, and the client sends it
+  only for `station`, `wifi-ap`, `esp-now-initiator` and `esp-now-responder`, and
   only when the user picked a value (unset keeps the firmware default,
-  collector). The server rejects it with `400` for the modes that fix the
-  collection mode (`sniffer`, the emitters, the simplex ends), checked against
+  `report`). The server rejects it with `400` for the modes that fix the
+  reporting (`sniffer`, the emitters, the simplex ends), checked against
   the `mode` in the same request.
 - Mode `wifi-ap` requires `esp-csi-cli-rs` ≥ 0.7.0; the client gates it in the
   mode picker.
@@ -230,20 +231,22 @@ firmware whose mode vocabulary it predates.
 
 [`ClientProfile`]: ../src/profile.rs
 
-### `POST /api/devices/{id}/config/traffic`
+### `POST /api/devices/{id}/config/measurement`
 
 ```json
-{ "frequency_hz": 1000, "unsolicited": true }
+{ "periodicity_hz": 1000, "unsolicited": true }
 ```
 
-`frequency_hz` is required and parses as `u64`. `0` disables traffic.
+Forwards `set-measurement --periodicity-hz=<n> [--unsolicited=on|off]`.
+`periodicity_hz` is required and parses as `u64` — the rate of the traffic the
+node generates. `0` disables it.
 
 `unsolicited` is optional (`bool`): `true` makes the ICMP flood send
 unsolicited echo replies — one-directional traffic (peer never answers at the
 IP level), stable offered rate, but the flooding node captures no CSI back.
 The client sends it only for WiFi AP/station modes and omits it otherwise, so
 older firmware never sees an unknown flag. Round-trips via the `collection`
-section (`unsolicited`) of `GET …/config`.
+section (`periodicity_hz`, `unsolicited`) of `GET …/config`.
 
 ### `POST /api/devices/{id}/config/csi`
 
@@ -313,8 +316,8 @@ Applied at the start of each collection run. Default on the device is `lr`.
 
 Accepted rates: `1m`, `1m-l`, `2m`, `5m5`, `5m5-l`, `11m`, `11m-l`, `6m`,
 `9m`, `12m`, `18m`, `24m`, `36m`, `48m`, `54m`, `mcs0-lgi`..`mcs7-lgi`,
-`mcs0-sgi`. Reporting only (recorded in the device config), except on the
-ESP-NOW pair (`esp-now-central` / `esp-now-peripheral`), which applies it as the
+`mcs0-sgi`. Recorded in the device config only, except on the
+ESP-NOW pair (`esp-now-initiator` / `esp-now-responder`), which applies it as the
 TX PHY rate.
 
 ### `POST /api/devices/{id}/config/io-tasks`

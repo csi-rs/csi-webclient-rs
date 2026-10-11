@@ -1,7 +1,7 @@
 use crate::profile::ClientProfile;
 use crate::state::{
-    CollectionMode, CsiDeliveryMode, CsiForm, DeviceAction, DeviceState, Ht40Mode, OutputMode, PHY_RATES, WiFiMode,
-    WifiProtocol,
+    CsiDeliveryMode, CsiForm, DeviceAction, DeviceState, Ht40Mode, OutputMode, PHY_RATES, Reporting,
+    WiFiMode, WifiProtocol,
 };
 
 /// Render the configuration view for one device.
@@ -108,7 +108,7 @@ fn render_body(
                     "Every flood tick sends one frame back-to-back to every \
                      associated station (time-aligned multi-receiver CSI). \
                      Each station then sees the full traffic rate, so total \
-                     airtime = frequency × leases — lower the traffic rate if \
+                     airtime = periodicity × leases — lower the periodicity if \
                      the channel saturates. Off = round-robin one station per \
                      tick.",
                 );
@@ -142,7 +142,7 @@ fn render_body(
             ui.add(
                 egui::Label::new(
                     "Destination address of the injected frames; empty = broadcast. \
-                     Unicasting to a collector's MAC usually raises that collector's \
+                     Unicasting to a receiver's MAC usually raises that receiver's \
                      CSI rate. This node transmits only and captures no CSI — pair it \
                      with a sniffer on the same channel.",
                 )
@@ -175,14 +175,14 @@ fn render_body(
             );
         }
 
-        if forms.wifi.mode.admits_collection_choice() {
-            form_row(ui, "Collection", |ui| {
-                collection_picker(ui, &mut forms.wifi.collection);
+        if forms.wifi.mode.admits_reporting_choice() {
+            form_row(ui, "Reporting", |ui| {
+                reporting_picker(ui, &mut forms.wifi.reporting);
             });
             ui.add(
                 egui::Label::new(
-                    "Collector reports the CSI it captures; listener captures but does not \
-                     report. Unset keeps the firmware default (collector).",
+                    "report — sends its CSI to the host; none — measures, reports nothing. \
+                     Unset keeps the firmware default (report).",
                 )
                 .wrap(),
             );
@@ -228,19 +228,19 @@ fn render_body(
 
     if !hide_capture {
 
-    section_header(ui, "Traffic", |ui| {
-        form_row(ui, "Frequency (Hz)", |ui| {
+    section_header(ui, "Measurement", |ui| {
+        form_row(ui, "Periodicity (Hz)", |ui| {
             ui.add(
-                egui::TextEdit::singleline(&mut forms.traffic.frequency_hz).desired_width(120.0),
+                egui::TextEdit::singleline(&mut forms.measurement.periodicity_hz).desired_width(120.0),
             );
-            if ui.button("Apply Traffic Config").clicked() {
-                actions.push(DeviceAction::SetTraffic(forms.traffic.clone()));
+            if ui.button("Apply Measurement").clicked() {
+                actions.push(DeviceAction::SetMeasurement(forms.measurement.clone()));
             }
         });
         ui.add(
             egui::Label::new(
                 "For AP + station lab pairs: AP floods at 1000 Hz, station stays \
-                 receive-only (frequency 0).",
+                 receive-only (periodicity 0).",
             )
             .wrap(),
         );
@@ -249,17 +249,17 @@ fn render_body(
         // inject their own frames and sniffers generate no traffic.
         if matches!(forms.wifi.mode, WiFiMode::WifiAp | WiFiMode::Station) {
             let traffic_on = forms
-                .traffic
-                .frequency_hz
+                .measurement
+                .periodicity_hz
                 .trim()
                 .parse::<u64>()
                 .is_ok_and(|hz| hz > 0);
             ui.add_space(4.0);
-            // Moot while traffic generation is off (frequency 0/blank), and
-            // unsupported (whole set-traffic command rejected!) below 0.7.0.
+            // Moot while traffic generation is off (periodicity 0/blank), and
+            // unsupported (whole command rejected!) below 0.7.0.
             ui.add_enabled_ui(traffic_on && supports_unsolicited, |ui| {
                 ui.checkbox(
-                    &mut forms.traffic.unsolicited,
+                    &mut forms.measurement.unsolicited,
                     "Unsolicited echo-reply flood (one-directional)",
                 );
             });
@@ -278,7 +278,7 @@ fn render_body(
                 )
                 .wrap(),
             );
-            if traffic_on && forms.traffic.unsolicited && forms.csi_output.enabled {
+            if traffic_on && forms.measurement.unsolicited && forms.csi_output.enabled {
                 ui.colored_label(
                     egui::Color32::YELLOW,
                     "Unsolicited flood + CSI output on: this node will capture ~no CSI, \
@@ -316,8 +316,8 @@ fn render_body(
         });
         ui.add(
             egui::Label::new(
-                "Reporting only, except on the ESP-NOW pair (esp-now-central / \
-                 esp-now-peripheral), which applies it as the TX PHY rate.",
+                "Recorded only, except on the ESP-NOW pair (esp-now-initiator / \
+                 esp-now-responder), which applies it as the TX PHY rate.",
             )
             .wrap(),
         );
@@ -557,8 +557,8 @@ fn wifi_mode_picker(
             });
             ui.selectable_value(mode, WiFiMode::Ht20Emitter, "ht20-emitter");
             ui.selectable_value(mode, WiFiMode::Ht40Emitter, "ht40-emitter");
-            ui.selectable_value(mode, WiFiMode::EspNowCentral, "esp-now-central");
-            ui.selectable_value(mode, WiFiMode::EspNowPeripheral, "esp-now-peripheral");
+            ui.selectable_value(mode, WiFiMode::EspNowInitiator, "esp-now-initiator");
+            ui.selectable_value(mode, WiFiMode::EspNowResponder, "esp-now-responder");
             ui.selectable_value(mode, WiFiMode::EspNowSimplexSource, "esp-now-simplex-source");
             ui.selectable_value(mode, WiFiMode::EspNowSimplexPeer, "esp-now-simplex-peer");
             // Profile-supplied modes (none in the standard build).
@@ -578,14 +578,14 @@ fn ht40_picker(ui: &mut egui::Ui, mode: &mut Ht40Mode) {
         });
 }
 
-fn collection_picker(ui: &mut egui::Ui, collection: &mut Option<CollectionMode>) {
-    let label = collection.map_or("default (collector)", CollectionMode::as_api_value);
-    egui::ComboBox::from_id_salt("collection_combo")
+fn reporting_picker(ui: &mut egui::Ui, reporting: &mut Option<Reporting>) {
+    let label = reporting.map_or("default (report)", Reporting::as_api_value);
+    egui::ComboBox::from_id_salt("reporting_combo")
         .selected_text(label)
         .show_ui(ui, |ui| {
-            ui.selectable_value(collection, None, "default (collector)");
-            ui.selectable_value(collection, Some(CollectionMode::Collector), "collector");
-            ui.selectable_value(collection, Some(CollectionMode::Listener), "listener");
+            ui.selectable_value(reporting, None, "default (report)");
+            ui.selectable_value(reporting, Some(Reporting::Report), "report");
+            ui.selectable_value(reporting, Some(Reporting::None), "none");
         });
 }
 

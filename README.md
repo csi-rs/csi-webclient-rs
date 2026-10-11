@@ -9,13 +9,16 @@ This project provides a native Rust GUI (egui/eframe) that talks to a running `c
 - Discover and manage **multiple ESP32 devices** via `GET /api/devices` with automatic hotplug polling (~2 s).
 - Per-device configuration, control, and WebSocket streaming under `/api/devices/{id}/...`.
 - Fleet-wide **Start All / Stop All** and multi-select synchronized collection across several nodes (for example a star of
-  peripherals around one central, or a point-to-point pair).
+  responders around one initiator, or a point-to-point pair).
 - Connect per-device WebSockets and view incoming **serialized** CSI frame previews (COBS+postcard hex).
 - Record local **Parquet** exports (`csi_export_{id}_YYYYMMDD_HHmmss.parquet`) with a versioned schema
   (`schema_version` file metadata).
 - Switch runtime output behavior (`stream`, `dump`, `both`) per device from the UI.
-- Configure the node's **operational mode** — how it reaches the channel: `station`, `sniffer`,
-  `wifi-ap`, `ht20-emitter`, `ht40-emitter`, and the connectionless `esp-now-*` modes. The node
+- Configure the node's **mode** — how it reaches the channel: `station`, `sniffer`,
+  `wifi-ap`, `ht20-emitter`, `ht40-emitter`, and the connectionless `esp-now-*` modes
+  (`esp-now-initiator`, `esp-now-responder`, `esp-now-simplex-source`, `esp-now-simplex-peer`) —
+  plus its **reporting** (`report` | `none`) and measurement **periodicity**, named after
+  IEEE 802.11bf. Requires `csi-webserver` 0.4+ and firmware on CLI protocol 4. The node
   model is documented once, in
   [`esp-csi-rs/docs/network-model.md`](https://github.com/csi-rs/esp-csi-rs/blob/main/docs/network-model.md).
 - Toggle off-device **CSI output** per device (capture keeps running when delivery is off).
@@ -42,13 +45,13 @@ Top-level intent orchestration and event application happen in `src/app.rs`.
 
 ## Webserver Compatibility
 
-The client targets **`csi-webserver` ≥ 0.3.0**, with `esp-csi-cli-rs` ≥ 0.8.0 on the devices. Key endpoints:
+The client targets **`csi-webserver` ≥ 0.4.0**, with firmware on CLI protocol 4 (`esp-csi-cli-rs` ≥ 0.10.0) on the devices. Key endpoints:
 
 - `GET /api/devices` — discover attached boards and live status
 - `GET /api/devices/{id}/info`
 - `GET /api/devices/{id}/config`
 - `GET /api/devices/{id}/control/status`
-- `POST /api/devices/{id}/config/*` — wifi, traffic, csi, csi-output, output-mode, rate, io-tasks, csi-delivery, protocol, reset
+- `POST /api/devices/{id}/config/*` — wifi, measurement, csi, csi-output, output-mode, rate, io-tasks, csi-delivery, protocol, reset
 - `POST /api/devices/{id}/control/*` — start, stop, reset, stats
 - `GET /api/devices/{id}/ws` — per-device WebSocket (raw serialized CSI frames)
 
